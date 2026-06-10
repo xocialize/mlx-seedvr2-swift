@@ -3,6 +3,7 @@ import Foundation
 import AVFoundation
 import CoreVideo
 import MLXToolKit
+import FormatBridge
 @testable import MLXSeedVR2
 
 struct SeedVR2Tests {
@@ -53,7 +54,7 @@ struct SeedVR2Tests {
         #expect(back.modelsRootDirectory == nil)
     }
 
-    // MARK: - Live VideoIO round-trip (pure AVFoundation — no Metal, runs in CLI)
+    // MARK: - Live frame-stream round-trip (format-bridge Layer-2; no Metal, runs in CLI)
 
     @Test func videoIOTranscodesWithPerFrameTransform() async throws {
         // Write a tiny 8-frame 64×64 HEVC video, then transcode it through a passthrough-double
@@ -65,11 +66,12 @@ struct SeedVR2Tests {
 
         try await Self.writeTestVideo(to: src, width: 64, height: 64, frames: 8, fps: 8)
 
-        let meta = try await VideoIO.transcode(input: src, output: dst) { frame in
-            try Self.scaledCopy(frame, factor: 2)
+        let meta = try await FrameStreamTransform.run(input: src, output: dst) { frame in
+            [try Self.scaledCopy(frame, factor: 2)]
         }
-        #expect(meta.width == 64)
-        #expect(meta.frameRate > 0)
+        #expect(meta.sourceWidth == 64)
+        #expect(meta.sourceFrameRate > 0)
+        #expect(meta.frameCount == 8)
 
         // Verify the written output: 128×128, ~8 frames, video track present.
         let outAsset = AVURLAsset(url: dst)
@@ -80,6 +82,8 @@ struct SeedVR2Tests {
     }
 
     // MARK: - Helpers
+
+    enum TestVideoError: Error { case helper }
 
     static func writeTestVideo(to url: URL, width: Int, height: Int, frames: Int, fps: Int) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
@@ -99,10 +103,10 @@ struct SeedVR2Tests {
         writer.startSession(atSourceTime: .zero)
         for i in 0..<frames {
             while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 2_000_000) }
-            guard let pool = adaptor.pixelBufferPool else { throw VideoIOError.writeFailed("no pool") }
+            guard let pool = adaptor.pixelBufferPool else { throw TestVideoError.helper }
             var pb: CVPixelBuffer?
             CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
-            guard let buffer = pb else { throw VideoIOError.writeFailed("pool buffer") }
+            guard let buffer = pb else { throw TestVideoError.helper }
             CVPixelBufferLockBaseAddress(buffer, [])
             if let base = CVPixelBufferGetBaseAddress(buffer) {
                 memset(base, Int32(20 + i * 25), CVPixelBufferGetDataSize(buffer))
@@ -125,12 +129,12 @@ struct SeedVR2Tests {
             kCVPixelBufferIOSurfacePropertiesKey as String: [:],
         ]
         guard CVPixelBufferCreate(nil, ow, oh, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &out) == kCVReturnSuccess,
-              let dst = out else { throw VideoIOError.writeFailed("alloc \(ow)x\(oh)") }
+              let dst = out else { throw TestVideoError.helper }
         CVPixelBufferLockBaseAddress(src, .readOnly); CVPixelBufferLockBaseAddress(dst, [])
         defer { CVPixelBufferUnlockBaseAddress(src, .readOnly); CVPixelBufferUnlockBaseAddress(dst, []) }
         guard let sBase = CVPixelBufferGetBaseAddress(src)?.assumingMemoryBound(to: UInt8.self),
               let dBase = CVPixelBufferGetBaseAddress(dst)?.assumingMemoryBound(to: UInt8.self) else {
-            throw VideoIOError.writeFailed("base address")
+            throw TestVideoError.helper
         }
         let sRow = CVPixelBufferGetBytesPerRow(src), dRow = CVPixelBufferGetBytesPerRow(dst)
         for y in 0..<oh {

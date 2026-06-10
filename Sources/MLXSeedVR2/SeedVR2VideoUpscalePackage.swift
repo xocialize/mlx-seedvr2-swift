@@ -1,4 +1,5 @@
 import Foundation
+import FormatBridge
 import MLXToolKit
 import SeedVR2MLX
 
@@ -99,15 +100,19 @@ public final class SeedVR2VideoUpscalePackage: ModelPackage {
             try? FileManager.default.removeItem(at: outURL)
         }
 
-        let meta = try await VideoIO.transcode(input: inURL, output: outURL) { frame in
+        // Layer-2 media service (format-bridge): tier-agnostic decode — native codecs via
+        // VideoToolbox, non-native (WebM/MKV/VP9/AV1…) in software — then HEVC/BT.709 encode.
+        let meta = try await FrameStreamTransform.run(
+            input: inURL, output: outURL, timing: .preserveSource
+        ) { frame in
             try Task.checkCancellation()
-            return try refiner.refine(frame, factor: scale)
+            return [try refiner.refine(frame, factor: scale)]
         }
 
         let data = try Data(contentsOf: outURL)
         return VideoUpscaleResponse(
             video: Video(format: .mp4, data: data,
-                         durationSeconds: meta.duration, frameRate: meta.frameRate),
+                         durationSeconds: meta.sourceDuration, frameRate: meta.sourceFrameRate),
             appliedScale: scale)
     }
 }
