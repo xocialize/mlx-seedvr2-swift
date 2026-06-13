@@ -15,7 +15,7 @@ let package = Package(
         .library(name: "MLXSeedVR2", targets: ["MLXSeedVR2"]),
     ],
     dependencies: [
-        .package(path: "../mlx-engine-swift"),
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.3.0"),
         .package(path: "../format-bridge"),
         .package(url: "https://github.com/xocialize/seedvr2-mlx-swift.git", from: "0.1.0"),
         .package(url: "https://github.com/xocialize/realesrgan-mlx-swift.git", from: "0.2.0"),
