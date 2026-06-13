@@ -3,7 +3,7 @@ import Foundation
 import AVFoundation
 import CoreVideo
 import MLXToolKit
-import FormatBridge
+import FrameStreamNative
 @testable import MLXSeedVR2
 
 struct SeedVR2Tests {
@@ -54,7 +54,7 @@ struct SeedVR2Tests {
         #expect(back.modelsRootDirectory == nil)
     }
 
-    // MARK: - Live frame-stream round-trip (format-bridge Layer-2; no Metal, runs in CLI)
+    // MARK: - Live frame-stream round-trip (frame-stream-native; no Metal, runs in CLI)
 
     @Test func videoIOTranscodesWithPerFrameTransform() async throws {
         // Write a tiny 8-frame 64×64 HEVC video, then transcode it through a passthrough-double
@@ -66,7 +66,7 @@ struct SeedVR2Tests {
 
         try await Self.writeTestVideo(to: src, width: 64, height: 64, frames: 8, fps: 8)
 
-        let meta = try await FrameStreamTransform.run(input: src, output: dst) { frame in
+        let meta = try await NativeFrameStream.run(input: src, output: dst) { frame in
             [try Self.scaledCopy(frame, factor: 2)]
         }
         #expect(meta.sourceWidth == 64)

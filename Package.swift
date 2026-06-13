@@ -16,7 +16,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.3.0"),
-        .package(path: "../format-bridge"),
+        .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.1.0"),
         .package(url: "https://github.com/xocialize/seedvr2-mlx-swift.git", from: "0.1.0"),
         .package(url: "https://github.com/xocialize/realesrgan-mlx-swift.git", from: "0.2.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.30.0"),
@@ -26,7 +26,7 @@ let package = Package(
             name: "MLXSeedVR2",
             dependencies: [
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
-                .product(name: "FormatBridge", package: "format-bridge"),
+                .product(name: "FrameStreamNative", package: "frame-stream-native"),
                 .product(name: "SeedVR2MLX", package: "seedvr2-mlx-swift"),
                 .product(name: "RealESRGANMLX", package: "realesrgan-mlx-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
@@ -40,7 +40,7 @@ let package = Package(
             dependencies: [
                 "MLXSeedVR2",
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
-                .product(name: "FormatBridge", package: "format-bridge"),
+                .product(name: "FrameStreamNative", package: "frame-stream-native"),
                 .product(name: "MLXServeCore", package: "mlx-engine-swift"),
             ]
         ),

@@ -1,5 +1,5 @@
 import Foundation
-import FormatBridge
+import FrameStreamNative
 import MLXToolKit
 import SeedVR2MLX
 
@@ -100,9 +100,10 @@ public final class SeedVR2VideoUpscalePackage: ModelPackage {
             try? FileManager.default.removeItem(at: outURL)
         }
 
-        // Layer-2 media service (format-bridge): tier-agnostic decode — native codecs via
-        // VideoToolbox, non-native (WebM/MKV/VP9/AV1…) in software — then HEVC/BT.709 encode.
-        let meta = try await FrameStreamTransform.run(
+        // Native AVFoundation media seam (frame-stream-native): decode → per-frame refine →
+        // HEVC/BT.709 encode. Input is a native container (mp4/mov/m4v) — non-native sources are
+        // normalized upstream by format-bridge.
+        let meta = try await NativeFrameStream.run(
             input: inURL, output: outURL, timing: .preserveSource
         ) { frame in
             try Task.checkCancellation()
