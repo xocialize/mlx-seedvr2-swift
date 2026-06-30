@@ -10,51 +10,69 @@ struct SeedVR2Tests {
 
     // MARK: - Offline conformance
 
-    @Test func manifestIsVideoUpscaleAndPermissive() {
-        let m = SeedVR2VideoUpscalePackage.manifest
-        #expect(m.capabilities == [.videoUpscale])
+    @Test func manifestExposesBothSurfacesAndPermissive() {
+        let m = SeedVR2UpscalePackage.manifest
+        #expect(Set(m.capabilities) == [.imageUpscale, .videoUpscale])  // one model, two surfaces
         #expect(m.license.weightLicense == .apache2)
         #expect(m.license.portCodeLicense == .mit)
         #expect(LicensePolicy.permissiveOnly.evaluate(m.license) == .admitted)
     }
 
-    @Test func manifestRequirementsAreHeavy() {
-        let r = SeedVR2VideoUpscalePackage.manifest.requirements
+    @Test func manifestRequirementsBornClean() {
+        let r = SeedVR2UpscalePackage.manifest.requirements
         #expect(r.requiredBackends.contains(.metalGPU))
         #expect(r.chipFloor == .pro)
-        #expect(r.footprints.contains { $0.quant == .int8 })
-        #expect(r.footprints.contains { $0.quant == .bf16 })
+        let quants = Set(r.footprints.map(\.quant))
+        #expect(quants == [.fp16, .int8])          // int4 degrades (omitted); bf16 dropped
+        #expect(r.footprints.allSatisfy { $0.residentBytes > 0 && $0.peakActivationBytes > 0 })  // split declared
+        let int8 = r.footprints.first { $0.quant == .int8 }!
+        let fp16 = r.footprints.first { $0.quant == .fp16 }!
+        #expect(int8.residentBytes < fp16.residentBytes)
     }
 
-    @Test func surfaceIsTheCanonicalVideoUpscaleDescriptor() {
-        let s = SeedVR2VideoUpscalePackage.manifest.surfaces.first
-        #expect(s?.capability == .videoUpscale)
-        #expect(s?.parameters.first?.kind == .video)
-        #expect(s?.parameters.contains { $0.name == "scale" && !$0.required } == true)
+    @Test func surfacesAreImageAndVideoUpscale() {
+        let s = SeedVR2UpscalePackage.manifest.surfaces
+        let caps = Set(s.map(\.capability))
+        #expect(caps == [.imageUpscale, .videoUpscale])
+        let img = s.first { $0.capability == .imageUpscale }
+        #expect(img?.parameters.first?.kind == .image)
+        let vid = s.first { $0.capability == .videoUpscale }
+        #expect(vid?.parameters.first?.kind == .video)
+        #expect(s.allSatisfy { $0.parameters.contains { p in p.name == "scale" && !p.required } })
     }
 
     @Test func registrationConstructs() throws {
-        let reg = SeedVR2VideoUpscalePackage.registration
-        #expect(reg.manifest.capabilities == [.videoUpscale])
+        let reg = SeedVR2UpscalePackage.registration
+        #expect(Set(reg.manifest.capabilities) == [.imageUpscale, .videoUpscale])
         let pkg = try reg.makePackage(SeedVR2Configuration())
-        #expect(pkg is SeedVR2VideoUpscalePackage)
+        #expect(pkg is SeedVR2UpscalePackage)
     }
 
-    @Test func configurationDefaultsAndCodable() throws {
+    @Test func configDefaultsQuantRepoAndCodable() throws {
         let c = SeedVR2Configuration()
+        #expect(c.quant == .int8)                  // near-lossless default
         #expect(c.repo == "mlx-community/SeedVR2-3B-mlx-int8")
         #expect(c.defaultScale == 2)
         #expect(c.colorCorrect)
+        #expect(SeedVR2Configuration(quant: .fp16).repo == "mlx-community/SeedVR2-3B-mlx")
+        #expect(SeedVR2Configuration(repoOverride: "x/y").repo == "x/y")
 
-        var custom = SeedVR2Configuration(repo: "mlx-community/SeedVR2-3B-mlx", defaultScale: 4)
+        // Environment-specific fields are NOT persisted (engine re-stamps them per session).
+        var custom = SeedVR2Configuration(quant: .fp16, seed: 7, defaultScale: 4)
         custom.modelsRootDirectory = URL(fileURLWithPath: "/tmp/x")
+        custom.snapshotDirectory = URL(fileURLWithPath: "/tmp/snap")
+        custom.availableBudgetBytes = 12_000_000_000
         let back = try JSONDecoder().decode(SeedVR2Configuration.self, from: JSONEncoder().encode(custom))
+        #expect(back.quant == .fp16)
         #expect(back.repo == "mlx-community/SeedVR2-3B-mlx")
+        #expect(back.seed == 7)
         #expect(back.defaultScale == 4)
         #expect(back.modelsRootDirectory == nil)
+        #expect(back.snapshotDirectory == nil)
+        #expect(back.availableBudgetBytes == nil)
     }
 
-    // MARK: - Live frame-stream round-trip (frame-stream-native; no Metal, runs in CLI)
+    // MARK: - Live frame-stream round-trip (format-bridge Layer-2; no Metal, runs in CLI)
 
     @Test func videoIOTranscodesWithPerFrameTransform() async throws {
         // Write a tiny 8-frame 64×64 HEVC video, then transcode it through a passthrough-double

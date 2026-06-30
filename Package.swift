@@ -1,11 +1,13 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// mlx-seedvr2-swift — SeedVR2-3B one-step diffusion video super-resolution for MLXEngine.
+// mlx-seedvr2-swift — SeedVR2-3B one-step diffusion super-resolution for MLXEngine.
 // ONE repo, multiple products:
 //   • SeedVR2MLX     — engine-agnostic Swift/MLX core (no MLXToolKit dep; usable standalone)
 //   • seedvr2-upscale — the core's standalone CLI
-//   • MLXSeedVR2     — the MLXEngine `videoUpscale` ModelPackage over that core
+//   • MLXSeedVR2     — the MLXEngine ModelPackage: ONE SeedVR2UpscalePackage exposes BOTH
+//     imageUpscale (Export/diffusion tier) AND videoUpscale surfaces from one loaded 3B core.
+//   • seedvr2-package-smoke — drives the package through the engine's load()/run() seam (gate).
 // Consolidated 2026-06-18: the former standalone `seedvr2-mlx-swift` core was folded in (archived).
 // The tile/feathered-seam machinery is shared from the consolidated `mlx-realesrgan-swift` (RealESRGANMLX).
 let package = Package(
@@ -17,9 +19,10 @@ let package = Package(
         .library(name: "SeedVR2MLX", targets: ["SeedVR2MLX"]),
         .executable(name: "seedvr2-upscale", targets: ["RunUpscale"]),
         .library(name: "MLXSeedVR2", targets: ["MLXSeedVR2"]),
+        .executable(name: "seedvr2-package-smoke", targets: ["SeedVR2PackageSmoke"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.8.0"),
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.17.0"),
         .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.1.0"),
         // RealESRGANMLX now ships from the consolidated mlx-realesrgan-swift (was realesrgan-mlx-swift, archived).
         .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.2.0"),
@@ -61,6 +64,16 @@ let package = Package(
             ],
             // The cores (MLX) aren't Sendable-audited; the engine serializes lifecycle on
             // InferenceActor, so v5 mode keeps region-isolation a warning — same as siblings.
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
+            name: "SeedVR2PackageSmoke",
+            dependencies: [
+                "MLXSeedVR2",
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
