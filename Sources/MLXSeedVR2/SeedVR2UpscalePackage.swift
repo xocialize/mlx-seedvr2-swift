@@ -1,12 +1,22 @@
 import Foundation
 import FrameStreamNative
 import MLX
+import MLXProfiling
 import MLXToolKit
 import SeedVR2MLX
 
 /// Errors at the SeedVR2 package boundary.
 public enum SeedVR2PackageError: Error {
     case unsupportedScale(Int)
+}
+
+/// Monotonic frame index for the streaming transform closure (which is `@Sendable`, so it can't
+/// capture a `var`). Single-threaded per run (frames stream one at a time), but boxed for Sendable.
+private final class FrameCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var i = 0
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; let v = i; i += 1; return v }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return i }
 }
 
 /// An MLXEngine upscale package over **SeedVR2-3B** (ByteDance, one-step diffusion SR), exposing
@@ -177,12 +187,19 @@ public final class SeedVR2UpscalePackage: ModelPackage {
         // FFmpeg-free streaming decode→transform→encode (frame-stream-native): AVFoundation
         // AVAssetReader (BGRA) → per-frame refine → HEVC/BT.709 encode, memory bounded. Native
         // containers only (mp4/mov/m4v); non-native input must be normalized upstream.
+        // Per-frame refine is profiled (MLX_PROFILE=1) — the tile-bound diffusion transient is the
+        // memory peak; the region's phys/⚠PAGING readings separate compute-bound from paging.
+        let prof = MLXProfiler.shared
+        prof.beginRun("seedvr2 videoUpscale scale=\(scale)")
+        let frameNo = FrameCounter()
         let meta = try await NativeFrameStream.run(
             input: inURL, output: outURL, timing: .preserveSource
         ) { frame in
             try Task.checkCancellation()
-            return [try frameRefiner.refine(frame, factor: scale)]
+            let i = frameNo.next()
+            return [try prof.region("video", "frame", index: i) { try frameRefiner.refine(frame, factor: scale) }]
         }
+        prof.endRun(denominators: ["frame": Double(max(frameNo.value, 1))])
 
         let data = try Data(contentsOf: outURL)
         return VideoUpscaleResponse(
