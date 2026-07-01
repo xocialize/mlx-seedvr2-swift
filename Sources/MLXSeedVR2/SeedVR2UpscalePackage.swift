@@ -43,16 +43,18 @@ public final class SeedVR2UpscalePackage: ModelPackage {
             requirements: RequirementsManifest(
                 footprints: [
                     // resident = measured weight floor (DiT + fp16 VAE, post-load clearCache); peak
-                    // activation = one-step diffusion + VAE-decode transient. Measured via
-                    // seedvr2-package-smoke @256²→2× (512²): int8 resident 4.72 GB, MLX-peak 7.07 GB
-                    // (transient ~2.35 GB). int8 solid-measured; fp16 resident est from fp16/int8 DiT
-                    // delta. Activation conservative (single-pass image / per-tile video are
-                    // resolution-driven); in-app phys re-baseline pending (smoke MLX-peak under-reads
-                    // admission phys ~2.5–2.9×).
+                    // activation = one-step diffusion + VAE-decode transient. RE-BASELINED 2026-07-01
+                    // against REAL phys_footprint (HostMemory, the admission basis) on the VIDEO path,
+                    // int8 @384²/640²-in → tiled 2×: resident floor 4.75 GB, peak phys 8.5–8.9 GB →
+                    // activation ~4.1 GB. Activation is TILE-BOUND (256² diffusion tile), so it does
+                    // NOT grow with frame resolution and is stable across runs (no leak; high post-run
+                    // phys is stickiness). Supersedes the old smoke MLX-peak (7.07 GB) which under-read
+                    // real phys ~2.5×. fp16 still est (weights not measured — resident from DiT delta,
+                    // activation assumed ~int8 since VAE/attention transient dominates).
                     QuantFootprint(quant: .int8, residentBytes: 4_800_000_000,
-                                   peakActivationBytes: 3_500_000_000),   // int8 (default) — measured floor
+                                   peakActivationBytes: 4_500_000_000),   // int8 (default) — phys-measured (video)
                     QuantFootprint(quant: .fp16, residentBytes: 7_500_000_000,
-                                   peakActivationBytes: 3_500_000_000),   // fp16 floor = est (not measured)
+                                   peakActivationBytes: 4_500_000_000),   // fp16 resident est; activation ~int8
                 ],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
