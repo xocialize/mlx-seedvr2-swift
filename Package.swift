@@ -23,7 +23,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.17.0"),
-        .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.1.0"),
+        .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.3.0"),
         // RealESRGANMLX now ships from the consolidated mlx-realesrgan-swift (was realesrgan-mlx-swift, archived).
         .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.2.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.32.0"),
