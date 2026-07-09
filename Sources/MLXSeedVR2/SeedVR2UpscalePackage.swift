@@ -140,6 +140,10 @@ public final class SeedVR2UpscalePackage: ModelPackage {
     }
 
     public func run(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
+        // CAN-1: the entry checkpoint is the FIRST act of run() — before notLoaded validation and
+        // capability dispatch (engine ≥ 0.27.0). Mid-run cadence: per source frame in the video
+        // stream transform, per diffusion tile in the frame refiner, pre-forward in the image path.
+        try Task.checkCancellation()
         switch request.capability {
         case .imageUpscale:  return try await runImage(request)
         case .videoUpscale:  return try await runVideo(request)

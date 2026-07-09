@@ -54,6 +54,9 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
         // [1,3,Hpad,Wpad] in [-1,1], edge-replicated to the next /16 (VAE 8× + patch/window need it).
         let style = try Self.tensorFromCGImage(upsized)
 
+        // Pre-forward cancellation checkpoint (CAN): the V1 image path is a single monolithic
+        // one-step diffusion eval (no tile loop), so the real seams are entry + here.
+        try Task.checkCancellation()
         var refined = upscaler.upscale(processedImage: style, seed: seed)  // [1,3,1,Hpad,Wpad], [-1,1]
         if refined.ndim == 5 { refined = refined[0..., 0..., 0] }          // → [1,3,Hpad,Wpad]
         if colorCorrect {

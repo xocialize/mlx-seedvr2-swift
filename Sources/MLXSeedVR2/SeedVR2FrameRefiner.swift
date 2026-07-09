@@ -48,6 +48,10 @@ final class SeedVR2FrameRefiner: @unchecked Sendable {
         let tiler = MLXTileProcessor(tileSize: tileSize, overlap: tileOverlap, scale: 1)
         let seedRef = seed, model = upscaler, doCC = colorCorrect
         return try tiler.process(upsized) { tile in
+            // Cooperative cancellation once per diffusion tile (CAN mid-run cadence): sync code
+            // on the run's task sees the flag; the CancellationError propagates unchanged
+            // through the throwing tiler closure.
+            try Task.checkCancellation()
             // tile: [1, th, tw, 3] NHWC RGB in [0,1] → [-1,1] NCHW (= style, the upscaled input)
             let style = tile.transposed(0, 3, 1, 2) * 2 - 1
             var refined = model.upscale(processedImage: style, seed: seedRef)   // [1,3,1,th,tw]
