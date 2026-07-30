@@ -144,10 +144,9 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
         // Matching once against the whole pre-upscaled base restores the single-pass semantics exactly,
         // which is also why tiled and untiled output now agree instead of being two different looks.
         //
-        // ⚠️ **`SeedVR2FrameRefiner` still colour-matches per tile and therefore still has this defect.**
-        // It is not fixed here on purpose: video needs its own validation pass (temporal stability of a
-        // per-frame global match is a real question), and silently changing the validated export tier
-        // while chasing a stills bug is how two surfaces start disagreeing again.
+        // ✅ **`SeedVR2FrameRefiner` now matches globally per frame too** (v0.7.4) — the temporal
+        // question that had kept it per-tile was answered by measurement: the per-tile match was the
+        // temporally UNSTABLE variant (see the A/B numbers in `SeedVR2FrameRefiner.refine`).
         if colorCorrect {
             let assembled = try Self.tensor(fromBGRA: out)                    // [1,3,H,W] in [-1,1]
             let style = try Self.tensorFromCGImage(upsized)[0..., 0..., 0 ..< height, 0 ..< width]

@@ -31,16 +31,6 @@ final class SeedVR2FrameRefiner: @unchecked Sendable {
     private let seed: UInt64
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
-    /// ⚠️ **EXPERIMENT LEVER (V10-fix): per-frame GLOBAL colour match instead of per-tile.**
-    /// `labTransfer` is `histMatch` on global statistics; applied per tile each tile lands in a
-    /// slightly different colour space (the defect the stills path fixed in v0.7.1). The video path
-    /// was deliberately left per-tile pending a temporal-stability measurement — a per-frame global
-    /// match adapts to each frame's own statistics, and whether that adaptation flickers across
-    /// frames is exactly the open question. `SEEDVR2_VIDEO_GLOBAL_CC=1` enables the global variant
-    /// for that A/B; the default stays the shipped per-tile behaviour until the measurement decides.
-    private let globalColorCorrect =
-        ProcessInfo.processInfo.environment["SEEDVR2_VIDEO_GLOBAL_CC"] == "1"
-
     init(upscaler: SeedVR2Upscaler, tileSize: Int, tileOverlap: Int, colorCorrect: Bool, seed: UInt64) {
         self.upscaler = upscaler
         self.tileSize = tileSize
@@ -57,7 +47,6 @@ final class SeedVR2FrameRefiner: @unchecked Sendable {
 
         let tiler = MLXTileProcessor(tileSize: tileSize, overlap: tileOverlap, scale: 1)
         let seedRef = seed, model = upscaler
-        let doTileCC = colorCorrect && !globalColorCorrect
         let out = try tiler.process(upsized) { tile in
             // Cooperative cancellation once per diffusion tile (CAN mid-run cadence): sync code
             // on the run's task sees the flag; the CancellationError propagates unchanged
@@ -67,15 +56,26 @@ final class SeedVR2FrameRefiner: @unchecked Sendable {
             let style = tile.transposed(0, 3, 1, 2) * 2 - 1
             var refined = model.upscale(processedImage: style, seed: seedRef)   // [1,3,1,th,tw]
             if refined.ndim == 5 { refined = refined[0..., 0..., 0] }           // [1,3,th,tw]
-            let corrected = doTileCC
-                ? SeedVR2ColorCorrect.labTransfer(content: refined, style: style, luminanceWeight: 0.8)
-                : refined
-            return clip((corrected + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)  // [1,th,tw,3]
+            // 🚨 NO per-tile colour transfer — the frame is matched ONCE, globally, below.
+            return clip((refined + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)  // [1,th,tw,3]
         }
 
-        // Global variant: match ONCE against the whole pre-upscaled frame after assembly — the
-        // exact mirror of `SeedVR2ImageRefiner.refineTiled`'s colour handling.
-        if colorCorrect && globalColorCorrect {
+        // 🔑 **Colour-match ONCE per frame, against the whole pre-upscaled base — the stills v0.7.1
+        // construction, ported after the temporal question was answered by measurement (V10-fix,
+        // 2026-07-30).** `labTransfer` is `histMatch` on global statistics; per tile it puts every
+        // tile in its own colour space (visible tile grid + chroma speckle in flats). The video path
+        // had deliberately kept the per-tile match pending a flicker A/B — the worry being that a
+        // per-frame global match would make the whole frame's tone breathe with content. Measured on
+        // a 64-frame 2 px/frame pan (256→512 ×2, 256/32 tiles) against a Lanczos-only content floor
+        // of mean|Δa*| 0.110 / max 0.269 per frame-pair:
+        //   per-tile match:  mean|Δa*| 0.164, max 1.62  (spikes 6× the content floor — a tile's
+        //                    local histogram churns as content crosses its border, and the whole
+        //                    tile's colour jumps with it)
+        //   global match:    mean|Δa*| 0.092, max 0.235 (BELOW the content floor on both stats)
+        // The feared direction inverted: the per-tile match was the temporally unstable one, and the
+        // global match is more stable than the interpolation baseline on top of being spatially
+        // correct. One clip / one content class / one geometry — but the margin is not close.
+        if colorCorrect {
             let assembled = try SeedVR2ImageRefiner.tensor(fromBGRA: out)      // [1,3,H,W] in [-1,1]
             let style = try SeedVR2ImageRefiner.tensor(fromBGRA: upsized)
             let corrected = SeedVR2ColorCorrect.labTransfer(content: assembled, style: style,
