@@ -17,8 +17,10 @@ struct PackageSmoke: AsyncParsableCommand {
     @Option(name: .long, help: "Local snapshot dir (transformer/vae/pos_emb/config). Overrides repo download.")
     var snapshot: String?
     @Option(name: .long, help: "Input image path (png/jpeg).")
-    var image: String
-    @Option(name: .long, help: "Output PNG path.")
+    var image: String?
+    @Option(name: .long, help: "Input video path (mp4/mov/m4v) — drives the videoUpscale surface instead.")
+    var video: String?
+    @Option(name: .long, help: "Output path (PNG for --image, MP4 for --video).")
     var out: String
     @Option(name: .long, help: "Scale factor: 2 or 4.")
     var scale: Int = 2
@@ -47,6 +49,26 @@ struct PackageSmoke: AsyncParsableCommand {
         print(String(format: "[pkg] load → %.1fs, resident floor %.2f GB (quant=%@)",
                      Date().timeIntervalSince(loadStart), resident, quant))
 
+        if let video {
+            // videoUpscale surface — used by the V10-fix colour-match temporal A/B
+            // (SEEDVR2_VIDEO_GLOBAL_CC=1 flips the frame refiner to a per-frame global match).
+            let data = try Data(contentsOf: URL(fileURLWithPath: video))
+            let fmt: Video.Format = video.lowercased().hasSuffix(".mov") ? .mov : .mp4
+            let req = VideoUpscaleRequest(video: Video(format: fmt, data: data), scale: scale)
+            MLX.GPU.resetPeakMemory()
+            let runStart = Date()
+            let resp = try await pkg.run(req)
+            guard let r = resp as? VideoUpscaleResponse else { throw ExitCode(1) }
+            try r.video.data.write(to: URL(fileURLWithPath: out))
+            print(String(format: "[pkg] video run → scale=%d %.1fs dur=%.2fs fps=%.2f (peak %.2f GB) → %@",
+                         r.appliedScale, Date().timeIntervalSince(runStart),
+                         r.video.durationSeconds ?? 0, r.video.frameRate ?? 0,
+                         Double(MLX.GPU.peakMemory) / 1e9, out))
+            return
+        }
+        guard let image else {
+            print("[pkg] pass --image or --video"); throw ExitCode(2)
+        }
         let data = try Data(contentsOf: URL(fileURLWithPath: image))
         let fmt: Image.Format = image.lowercased().hasSuffix(".png") ? .png : .jpeg
         let req = ImageUpscaleRequest(image: Image(format: fmt, data: data), scale: scale)
