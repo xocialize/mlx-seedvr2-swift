@@ -98,11 +98,25 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
         let tiler = MLXTileProcessor(tileSize: tileSize, overlap: tileOverlap, scale: 1)
         let seedRef = seed, model = upscaler
 
+        // 🚨 **Per-tile seed. One seed for every tile makes every tile get the IDENTICAL noise
+        // realization**, because `SeedVR2LatentCreator.noiseLatents(seed:height:width:)` is sized to the
+        // *tile's* latent, not the image's. For a one-step diffusion that seeds texture from noise, the
+        // result is a texture pattern locked to the tile grid — periodic, and therefore exactly what a
+        // structural metric punishes. Decorrelating per tile removes the periodicity.
+        //
+        // ⚠️ **This is a mitigation, not the correct fix.** The right construction draws ONE noise field
+        // over the whole image's latent and slices each tile's region out of it, so the field is
+        // continuous across seams instead of merely different. That needs each tile's origin, which
+        // `MLXTileProcessor.process` does not hand to its closure — a small API addition, and the
+        // follow-up this comment exists to justify.
+        var tileIndex = 0
         let out = try tiler.process(buffer) { tile in
             // Per-tile cancellation: with tiling there IS a mid-run seam, unlike the single-pass branch.
             try Task.checkCancellation()
+            let tileSeed = seedRef &+ UInt64(tileIndex) &* 0x9E37_79B9_7F4A_7C15
+            tileIndex += 1
             let style = tile.transposed(0, 3, 1, 2) * 2 - 1              // [1,3,th,tw] in [-1,1]
-            var refined = model.upscale(processedImage: style, seed: seedRef)
+            var refined = model.upscale(processedImage: style, seed: tileSeed)
             if refined.ndim == 5 { refined = refined[0..., 0..., 0] }
             // 🚨 **NO per-tile colour transfer — see `colorCorrect` below.**
             let result = clip((refined + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)
