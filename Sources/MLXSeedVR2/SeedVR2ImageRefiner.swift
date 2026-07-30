@@ -96,7 +96,7 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
     private func refineTiled(_ upsized: CGImage, width: Int, height: Int) throws -> Image {
         let buffer = try Self.pixelBuffer(from: upsized)
         let tiler = MLXTileProcessor(tileSize: tileSize, overlap: tileOverlap, scale: 1)
-        let seedRef = seed, model = upscaler, doCC = colorCorrect
+        let seedRef = seed, model = upscaler
 
         let out = try tiler.process(buffer) { tile in
             // Per-tile cancellation: with tiling there IS a mid-run seam, unlike the single-pass branch.
@@ -104,14 +104,64 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
             let style = tile.transposed(0, 3, 1, 2) * 2 - 1              // [1,3,th,tw] in [-1,1]
             var refined = model.upscale(processedImage: style, seed: seedRef)
             if refined.ndim == 5 { refined = refined[0..., 0..., 0] }
-            let corrected = doCC
-                ? SeedVR2ColorCorrect.labTransfer(content: refined, style: style, luminanceWeight: 0.8)
-                : refined
-            let result = clip((corrected + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)
+            // 🚨 **NO per-tile colour transfer — see `colorCorrect` below.**
+            let result = clip((refined + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)
             eval(result)
             return result
         }
+
+        // 🚨 **The colour transfer runs ONCE, on the assembled image, and this is the whole reason the
+        // tiled branch is not just the frame path with a different input type.**
+        //
+        // `labTransfer` is `histMatch` on the LAB a/b channels (and partially on L) — a **global
+        // statistics** operation. Applied per tile, every 256² tile is matched to *its own* local
+        // histogram, so each one lands in a slightly different colour space: measured as a visible
+        // tile-grid across flat regions plus chroma speckle where a local a/b histogram is nearly
+        // degenerate (dark, near-neutral areas). Overlap feathering cannot repair that — it blends
+        // neighbours that disagree about what neutral *is*.
+        //
+        // Matching once against the whole pre-upscaled base restores the single-pass semantics exactly,
+        // which is also why tiled and untiled output now agree instead of being two different looks.
+        //
+        // ⚠️ **`SeedVR2FrameRefiner` still colour-matches per tile and therefore still has this defect.**
+        // It is not fixed here on purpose: video needs its own validation pass (temporal stability of a
+        // per-frame global match is a real question), and silently changing the validated export tier
+        // while chasing a stills bug is how two surfaces start disagreeing again.
+        if colorCorrect {
+            let assembled = try Self.tensor(fromBGRA: out)                    // [1,3,H,W] in [-1,1]
+            let style = try Self.tensorFromCGImage(upsized)[0..., 0..., 0 ..< height, 0 ..< width]
+            let corrected = SeedVR2ColorCorrect.labTransfer(content: assembled, style: style,
+                                                            luminanceWeight: 0.8)
+            let mapped = clip((corrected + 1) * 0.5, min: 0, max: 1)
+            eval(mapped)
+            let data = try Self.pngFromTensor(mapped, width: width, height: height)
+            return Image(format: .png, data: data, width: width, height: height)
+        }
         return try Self.image(fromBGRA: out, width: width, height: height)
+    }
+
+    /// BGRA `CVPixelBuffer` → `[1,3,H,W]` float tensor in `[-1,1]`, the currency `labTransfer` takes.
+    static func tensor(fromBGRA buffer: CVPixelBuffer) throws -> MLXArray {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+            throw SeedVR2ImageRefinerError.pixelAccessFailed
+        }
+        let bytes = base.assumingMemoryBound(to: UInt8.self)
+        var floats = [Float](repeating: 0, count: 3 * h * w)
+        let plane = h * w
+        for y in 0 ..< h {
+            for x in 0 ..< w {
+                let p = y * stride + x * 4      // BGRA byte order: B,G,R,A
+                let o = y * w + x
+                floats[o]             = Float(bytes[p + 2]) / 127.5 - 1   // R
+                floats[plane + o]     = Float(bytes[p + 1]) / 127.5 - 1   // G
+                floats[2 * plane + o] = Float(bytes[p]) / 127.5 - 1       // B
+            }
+        }
+        return MLXArray(floats, [1, 3, h, w])
     }
 
     /// CGImage → BGRA `CVPixelBuffer`, the currency `MLXTileProcessor` takes.
