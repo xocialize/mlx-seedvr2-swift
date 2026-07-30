@@ -4,23 +4,35 @@ import Foundation
 /// SeedVR2 transformer configuration. Defaults match the 3B checkpoint
 /// (mflux `SeedVR2Transformer.__init__`); 7B applies `transformerOverrides`.
 ///
-/// ⚠️ **`r7B` IS NOMINAL — no 7B-lineage checkpoint has ever been loaded through it, and as written it
-/// very likely cannot be.** Recorded 2026-07-29 (`mlxengine-todo/PORT-QUEUE.md` P16, spike **V11**). The
-/// dimensions here are right; three things this struct cannot express are not:
+/// 🚨 **`r7B` CANNOT LOAD A 7B CHECKPOINT. Verified 2026-07-29 against ByteDance's own
+/// `seedvr2_ema_7b_sharp.pth`** — spike **V11** in `mlxengine-todo/GAP-PROGRAM.md` (probe + full output
+/// under `mlxengine-todo/probes/`). The dimensions below are right; **two architectural facts this struct
+/// cannot express make the load fail**, and neither is a naming difference:
 ///
-///   1. **The MLP is non-gated with biases** in the 7B family. `SwiGLU.swift` is unconditionally gated
-///      with `bias: false`, and there is no `mlpType` field to switch on.
-///   2. **`out_scale` / `out_shift` / `vid_out_norm` are absent** from 7B-lineage checkpoints, but
-///      `Transformer.swift` declares all three and *uses* them in its forward pass.
-///   3. **`emb_in.proj_in` takes a 256-dim time embedding** (3B: 64), which `apply(overrides:)` has no
-///      field for.
+///   1. **The 7B MLP is non-gated with biases.** `blocks.N.mlp.{txt,vid}.proj_{in,out}.bias` are the
+///      *only* keys the 7B has that the 3B lacks, and `proj_in_gate` appears in all three 3B variants
+///      and none of the 7B's. `SwiGLU.swift` is unconditionally gated with `bias: false`, and there is
+///      no `mlpType` field to switch on.
+///   2. **The 7B has no output adaLN and no final norm.** `vid_out_ada.out_scale`, `.out_shift` and
+///      `vid_out_norm.weight` are present in the 3B and absent from the 7B, whose non-block keys are
+///      only `emb_in.*`, `txt_in.*`, `vid_in.proj.*`, `vid_out.proj.*`. `Transformer.swift` declares all
+///      three and *uses* them in its forward pass — so this is a forward-pass difference, not merely
+///      missing parameters.
 ///
-/// Evidence is a safetensors key-pattern diff of `lvladikov/SeedVR2-1.4B` (a 6-block distill of
-/// ByteDance's 7B) against the shipping `SeedVR2-3B-mlx-int8`. ⚠️ **Honest limit:** that infers the
-/// teacher's architecture from a third party's distill of it — the distiller may have made these changes
-/// themselves, in which case `r7B` is correct and the distill is the outlier. **V11 settles it against
-/// ByteDance's own 7B.** Until then, treat `r7B` as an untested hypothesis rather than a supported path:
-/// `WeightLoader.swift` will select it from a `variant` string containing `"7b"` and then fail to load.
+/// ✅ **`mmLayers = 36` below is CORRECT** — the 7B genuinely has zero `.all` blocks; all 36 are
+/// multi-modal. And `txt_in` is 5120-dim in both checkpoints, so 3B text embeddings are reusable.
+///
+/// ⚠️ **A third claim in the first version of this note was WRONG and is recorded because the mistake
+/// generalizes.** It read *"`emb_in.proj_in` takes a 256-dim time embedding (3B: 64)"*. **Both are 256.**
+/// The "64" came from reading `[2560, 64]` in the **int8** conversion as a logical shape — MLX 8-bit packs
+/// four values per `uint32`, so 64 × 4 = 256, and the `scales [2560, 4]` confirm it (group size 64).
+/// 🔑 **Never infer an architecture from a quantized checkpoint's shapes:** the packing factor divides
+/// them silently, and the result is always plausible. A control arm on a checkpoint whose key set is
+/// already known is what caught it.
+///
+/// Until the branch is implemented, `WeightLoader.swift` will still select `r7B` from a `variant` string
+/// containing `"7b"` and then fail to load. Fixing it is two local changes — a non-gated-MLP-with-biases
+/// variant behind a config switch, and making the output adaLN + final norm conditional.
 public struct SeedVR2Config: Codable, Sendable {
     public var vidInChannels: Int = 33
     public var vidOutChannels: Int = 16
