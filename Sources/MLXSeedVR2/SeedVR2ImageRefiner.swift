@@ -96,27 +96,34 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
     private func refineTiled(_ upsized: CGImage, width: Int, height: Int) throws -> Image {
         let buffer = try Self.pixelBuffer(from: upsized)
         let tiler = MLXTileProcessor(tileSize: tileSize, overlap: tileOverlap, scale: 1)
-        let seedRef = seed, model = upscaler
+        let model = upscaler
 
-        // 🚨 **Per-tile seed. One seed for every tile makes every tile get the IDENTICAL noise
-        // realization**, because `SeedVR2LatentCreator.noiseLatents(seed:height:width:)` is sized to the
-        // *tile's* latent, not the image's. For a one-step diffusion that seeds texture from noise, the
-        // result is a texture pattern locked to the tile grid — periodic, and therefore exactly what a
-        // structural metric punishes. Decorrelating per tile removes the periodicity.
+        // 🔑 **ONE noise field over the whole image's latent, sliced per tile — the correct
+        // construction.** `SeedVR2LatentCreator.noiseLatents` sized per call would give each tile its
+        // own independent field: identical everywhere with one seed (periodic texture locked to the
+        // tile grid — shipped v0.7.2 decorrelated that with a per-tile seed), and DISCONTINUOUS across
+        // seams either way. Drawing the field once at the image's latent resolution (1/8 pixel for the
+        // 8× VAE) and slicing each tile's region keeps the field continuous across seams, matching the
+        // single-pass branch's semantics. The slice origin needs the tile's position, which the
+        // region-aware `MLXTileProcessor.process` overload (mlx-realesrgan-swift 0.6.0) provides.
         //
-        // ⚠️ **This is a mitigation, not the correct fix.** The right construction draws ONE noise field
-        // over the whole image's latent and slices each tile's region out of it, so the field is
-        // continuous across seams instead of merely different. That needs each tile's origin, which
-        // `MLXTileProcessor.process` does not hand to its closure — a small API addition, and the
-        // follow-up this comment exists to justify.
-        var tileIndex = 0
-        let out = try tiler.process(buffer) { tile in
+        // ⚠️ Latent cells are 8 px; a clamped last-row/column tile origin may not be 8-aligned, so its
+        // slice can sit up to 7 px off the tile's true position. Sub-cell, edge-tiles-only — accepted.
+        // The field is padded up to the tile latent so a tile larger than the image (skinny inputs)
+        // still slices in bounds; the excess only ever lands under edge-replicated padding pixels.
+        precondition(tileSize % 16 == 0, "tileSize \(tileSize) must be /16 (VAE 8× + patch/window)")
+        let tileLat = tileSize / 8
+        let fieldH = max((height + 7) / 8, tileLat), fieldW = max((width + 7) / 8, tileLat)
+        let wholeNoise = SeedVR2LatentCreator.noiseLatents(seed: seed, height: fieldH, width: fieldW)
+        eval(wholeNoise)
+
+        let out = try tiler.process(buffer) { tile, region in
             // Per-tile cancellation: with tiling there IS a mid-run seam, unlike the single-pass branch.
             try Task.checkCancellation()
-            let tileSeed = seedRef &+ UInt64(tileIndex) &* 0x9E37_79B9_7F4A_7C15
-            tileIndex += 1
+            let ly = min(region.y / 8, fieldH - tileLat), lx = min(region.x / 8, fieldW - tileLat)
+            let noise = wholeNoise[0..., 0..., 0..., ly ..< (ly + tileLat), lx ..< (lx + tileLat)]
             let style = tile.transposed(0, 3, 1, 2) * 2 - 1              // [1,3,th,tw] in [-1,1]
-            var refined = model.upscale(processedImage: style, seed: tileSeed)
+            var refined = model.upscale(processedImage: style, noise: noise)
             if refined.ndim == 5 { refined = refined[0..., 0..., 0] }
             // 🚨 **NO per-tile colour transfer — see `colorCorrect` below.**
             let result = clip((refined + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)

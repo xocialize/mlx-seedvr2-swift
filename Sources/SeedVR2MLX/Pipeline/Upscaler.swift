@@ -40,9 +40,22 @@ public final class SeedVR2Upscaler {
     /// processedImage: [B,3,H,W] (or [B,3,1,H,W]) in [-1,1], dims padded to /16.
     /// Returns the decoded latent image [B,3,H*?,W*?] (pre-crop, pre-color-correct).
     public func upscale(processedImage: MLXArray, seed: UInt64, numSteps: Int = 1) -> MLXArray {
+        upscale(processedImage: processedImage, noise: nil, seed: seed, numSteps: numSteps)
+    }
+
+    /// Variant taking pre-made noise latents ([B,16,1,h,w], matching the encoded latent's spatial
+    /// dims — i.e. H/8 × W/8 for the 8× VAE). A tiled host uses this to slice each tile's noise out
+    /// of ONE field drawn over the whole image, so the field is continuous across tile seams instead
+    /// of independently drawn (and therefore discontinuous) per tile. `noise: nil` draws from `seed`
+    /// sized to this call's latent — the single-pass behaviour, unchanged.
+    public func upscale(processedImage: MLXArray, noise: MLXArray?, seed: UInt64 = 0, numSteps: Int = 1) -> MLXArray {
         let initial = vae.encode(processedImage)                 // [B,16,1,h,w]
         let condition = SeedVR2LatentCreator.condition(initial)  // [B,17,1,h,w]
-        var latents = SeedVR2LatentCreator.noiseLatents(seed: seed, height: initial.shape[3], width: initial.shape[4])
+        if let noise {
+            precondition(noise.shape[3] == initial.shape[3] && noise.shape[4] == initial.shape[4],
+                         "noise \(noise.shape) does not match the encoded latent \(initial.shape)")
+        }
+        var latents = noise ?? SeedVR2LatentCreator.noiseLatents(seed: seed, height: initial.shape[3], width: initial.shape[4])
 
         let scheduler = SeedVR2EulerScheduler(numInferenceSteps: numSteps)
         for t in 0 ..< scheduler.numSteps {
