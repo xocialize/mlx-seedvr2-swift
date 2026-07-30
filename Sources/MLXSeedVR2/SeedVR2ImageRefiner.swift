@@ -16,10 +16,12 @@
 
 import CoreGraphics
 import CoreImage
+import CoreVideo
 import Foundation
 import ImageIO
 import MLX
 import MLXToolKit
+import RealESRGANMLX   // MLXTileProcessor — the shared feathered-seam tiler
 import SeedVR2MLX
 import UniformTypeIdentifiers
 
@@ -35,12 +37,19 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
     private let upscaler: SeedVR2Upscaler
     private let seed: UInt64
     private let colorCorrect: Bool
+    private let tileSize: Int
+    private let tileOverlap: Int
+    private let wholeFramePixels: Int
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
-    init(upscaler: SeedVR2Upscaler, seed: UInt64, colorCorrect: Bool) {
+    init(upscaler: SeedVR2Upscaler, seed: UInt64, colorCorrect: Bool,
+         tileSize: Int = 256, tileOverlap: Int = 32, wholeFramePixels: Int = 1024 * 1024) {
         self.upscaler = upscaler
         self.seed = seed
         self.colorCorrect = colorCorrect
+        self.tileSize = tileSize
+        self.tileOverlap = tileOverlap
+        self.wholeFramePixels = wholeFramePixels
     }
 
     /// Upscale one image by `factor` (2 or 4): Lanczos pre-upscale → 1:1 diffusion refine → crop.
@@ -50,6 +59,12 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
         let src = try Self.decodeCGImage(image)
         let upsized = try lanczosUpscale(src, factor: factor)         // exact (w·f, h·f)
         let outW = upsized.width, outH = upsized.height
+
+        // Above the measured envelope, refine in tiles. The diffusion still runs at 1:1 — only the
+        // *extent* of each call changes — so this is the same operation, kept inside the model's regime.
+        if wholeFramePixels == 0 || outW * outH > wholeFramePixels {
+            return try refineTiled(upsized, width: outW, height: outH)
+        }
 
         // [1,3,Hpad,Wpad] in [-1,1], edge-replicated to the next /16 (VAE 8× + patch/window need it).
         let style = try Self.tensorFromCGImage(upsized)
@@ -68,6 +83,83 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
 
         let data = try Self.pngFromTensor(cropped, width: outW, height: outH)
         return Image(format: .png, data: data, width: outW, height: outH)
+    }
+
+    // MARK: - Tiled refine (above the envelope)
+
+    /// Refine an already-upscaled image tile-by-tile at 1:1 with feathered seams.
+    ///
+    /// ⚠️ The closure below is a deliberate mirror of `SeedVR2FrameRefiner.refine`'s — same NHWC→NCHW
+    /// transpose, same `[0,1]`→`[-1,1]` mapping, same LAB transfer with `luminanceWeight: 0.8`, same clip
+    /// on the way out. If one is ever changed, change both, or the two surfaces stop agreeing on what
+    /// "refined" means.
+    private func refineTiled(_ upsized: CGImage, width: Int, height: Int) throws -> Image {
+        let buffer = try Self.pixelBuffer(from: upsized)
+        let tiler = MLXTileProcessor(tileSize: tileSize, overlap: tileOverlap, scale: 1)
+        let seedRef = seed, model = upscaler, doCC = colorCorrect
+
+        let out = try tiler.process(buffer) { tile in
+            // Per-tile cancellation: with tiling there IS a mid-run seam, unlike the single-pass branch.
+            try Task.checkCancellation()
+            let style = tile.transposed(0, 3, 1, 2) * 2 - 1              // [1,3,th,tw] in [-1,1]
+            var refined = model.upscale(processedImage: style, seed: seedRef)
+            if refined.ndim == 5 { refined = refined[0..., 0..., 0] }
+            let corrected = doCC
+                ? SeedVR2ColorCorrect.labTransfer(content: refined, style: style, luminanceWeight: 0.8)
+                : refined
+            let result = clip((corrected + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)
+            eval(result)
+            return result
+        }
+        return try Self.image(fromBGRA: out, width: width, height: height)
+    }
+
+    /// CGImage → BGRA `CVPixelBuffer`, the currency `MLXTileProcessor` takes.
+    static func pixelBuffer(from cg: CGImage) throws -> CVPixelBuffer {
+        let w = cg.width, h = cg.height
+        var out: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w, kCVPixelBufferHeightKey as String: h,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ]
+        guard CVPixelBufferCreate(nil, w, h, kCVPixelFormatType_32BGRA,
+                                  attrs as CFDictionary, &out) == kCVReturnSuccess,
+              let buffer = out else { throw SeedVR2ImageRefinerError.pixelAccessFailed }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        // ⚠️ BGRA byte order = `.byteOrder32Little` + `premultipliedFirst`; getting this wrong swaps the
+        // red and blue channels, which reads as a colour-graded result rather than as a bug.
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let ctx = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: w, height: h,
+                                  bitsPerComponent: 8,
+                                  bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info.rawValue)
+        else { throw SeedVR2ImageRefinerError.pixelAccessFailed }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return buffer
+    }
+
+    /// BGRA `CVPixelBuffer` → PNG `Image`, matching the single-pass branch's return contract.
+    static func image(fromBGRA buffer: CVPixelBuffer, width: Int, height: Int) throws -> Image {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                | CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let base = CVPixelBufferGetBaseAddress(buffer),
+              let ctx = CGContext(data: base, width: CVPixelBufferGetWidth(buffer),
+                                  height: CVPixelBufferGetHeight(buffer), bitsPerComponent: 8,
+                                  bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info.rawValue),
+              let cg = ctx.makeImage() else { throw SeedVR2ImageRefinerError.encodeFailed }
+
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)
+        else { throw SeedVR2ImageRefinerError.encodeFailed }
+        CGImageDestinationAddImage(dest, cg, nil)
+        guard CGImageDestinationFinalize(dest) else { throw SeedVR2ImageRefinerError.encodeFailed }
+        return Image(format: .png, data: data as Data, width: width, height: height)
     }
 
     // MARK: - CoreImage Lanczos

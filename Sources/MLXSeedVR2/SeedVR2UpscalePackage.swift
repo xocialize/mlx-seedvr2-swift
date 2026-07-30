@@ -122,7 +122,10 @@ public final class SeedVR2UpscalePackage: ModelPackage {
         upscaler = model
         imageRefiner = SeedVR2ImageRefiner(upscaler: model,
                                            seed: configuration.seed,
-                                           colorCorrect: configuration.colorCorrect)
+                                           colorCorrect: configuration.colorCorrect,
+                                           tileSize: configuration.tileSize,
+                                           tileOverlap: configuration.tileOverlap,
+                                           wholeFramePixels: configuration.imageWholeFramePixels)
         frameRefiner = SeedVR2FrameRefiner(upscaler: model,
                                            tileSize: configuration.tileSize,
                                            tileOverlap: configuration.tileOverlap,
@@ -151,7 +154,7 @@ public final class SeedVR2UpscalePackage: ModelPackage {
         }
     }
 
-    // MARK: - imageUpscale (single-pass)
+    // MARK: - imageUpscale (single-pass below the measured envelope, tiled above it)
 
     private func runImage(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
         guard let imageRefiner else { throw PackageError.notLoaded }

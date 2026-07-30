@@ -20,11 +20,31 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
 
     /// Default integer scale when a request omits one (2 or 4).
     public var defaultScale: Int
-    /// Refinement tile size / overlap for the **video** surface (the diffusion runs per tile at 1:1
-    /// after the pre-upscale; feathered seams via the shared `MLXTileProcessor`). The image surface
-    /// is single-pass V1.
+    /// Refinement tile size / overlap, shared by the **video** and (since the V10 fix) the **image**
+    /// surface: the diffusion runs per tile at 1:1 after the pre-upscale, feathered seams via the shared
+    /// `MLXTileProcessor`.
     public var tileSize: Int
     public var tileOverlap: Int
+
+    /// 🚨 **Output-pixel ceiling for the image surface's single-pass path; above it, tile.**
+    ///
+    /// Measured 2026-07-29 (`mlxengine-todo/GAP-PROGRAM.md` **V10**). The stills path used to be
+    /// single-pass at every size, and that **broke above ~1 MP output** — not gradually, as a cliff.
+    /// SSIMULACRA2 against a lossless reference crop, one signage master:
+    ///
+    ///     128→512  ×4  →  −13.59     (works, looks good)
+    ///     256→1024 ×4  →   −4.74     (works, looks good)
+    ///     512→1024 ×2  →   +8.16     (works, looks good)
+    ///     512→2048 ×4  →  −64.23     ← global softness, misregistration, glyphs destroyed
+    ///
+    /// 🔑 **Why a cliff and not a slope:** SeedVR2 runs windowed attention (`window: [4,3,3]`) over a
+    /// latent 1/8 the pixel side, so a 2048² single pass is a **256²-token latent** — far outside its
+    /// training regime. Tiling at `tileSize` keeps every diffusion call in-regime. It also bounds the
+    /// activation peak, which was **43.7 GB attributed process footprint** for one 512→2048 still.
+    ///
+    /// Default `1024 × 1024`: the largest output measured clean single-pass. ⚠️ That is **one image's**
+    /// cliff edge — it is a conservative default, not a characterized limit. `0` forces tiling always.
+    public var imageWholeFramePixels: Int
 
     /// Absolute path to a pre-materialized weights snapshot (the directory holding
     /// `transformer.safetensors` / `vae.safetensors` / `pos_emb.safetensors` / `config.json`).
@@ -47,6 +67,7 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
                 defaultScale: Int = 2,
                 tileSize: Int = 256,
                 tileOverlap: Int = 32,
+                imageWholeFramePixels: Int = 1024 * 1024,
                 snapshotDirectory: URL? = nil,
                 modelsRootDirectory: URL? = nil,
                 availableBudgetBytes: UInt64? = nil) {
@@ -57,6 +78,7 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
         self.defaultScale = defaultScale
         self.tileSize = tileSize
         self.tileOverlap = tileOverlap
+        self.imageWholeFramePixels = imageWholeFramePixels
         self.snapshotDirectory = snapshotDirectory
         self.modelsRootDirectory = modelsRootDirectory
         self.availableBudgetBytes = availableBudgetBytes
@@ -74,5 +96,6 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     // absolute snapshot path) are excluded from `Codable` — the engine re-stamps them per session.
     private enum CodingKeys: String, CodingKey {
         case quant, repoOverride, seed, colorCorrect, defaultScale, tileSize, tileOverlap
+        case imageWholeFramePixels
     }
 }
