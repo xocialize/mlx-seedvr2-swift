@@ -28,7 +28,7 @@ let package = Package(
         .package(url: "https://github.com/xocialize/mlx-profiling.git", from: "0.1.0"),
         // RealESRGANMLX now ships from the consolidated mlx-realesrgan-swift (was realesrgan-mlx-swift, archived).
         // ≥ 0.6.0: region-aware MLXTileProcessor.process (tile origins for the continuous noise field).
-        .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.6.1"),
+        .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.6.2"),
         .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.32.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
