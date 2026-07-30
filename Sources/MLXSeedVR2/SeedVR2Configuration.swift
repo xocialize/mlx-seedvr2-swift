@@ -26,6 +26,20 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     public var tileSize: Int
     public var tileOverlap: Int
 
+    /// **Halo (context padding) for the image surface's tiled refine, in output pixels per side.**
+    ///
+    /// Overlap blends tile *outputs* that already disagree; a halo makes them agree in the first
+    /// place: each tile is refined over `(tileSize + 2·tileHalo)²` of REAL surrounding image content
+    /// and the margin is cropped off the output, so the windowed attention actually sees the tile's
+    /// neighbourhood instead of a border. This targets the measured residual of the V10 fix — the
+    /// per-tile-context disagreement that survived all three noise constructions (the tile lattice at
+    /// the `tileSize − tileOverlap` stride and the flat-region chroma speckle).
+    ///
+    /// ⚠️ Not free: at `tileSize` 256 a 64 px halo refines 384² per tile — 2.25× the pixels.
+    /// Must keep `tileSize + 2·tileHalo` a multiple of 16 (VAE 8× + patch/window), i.e. `tileHalo`
+    /// a multiple of 8. `0` (the default) is the pre-halo behaviour, byte-identical.
+    public var tileHalo: Int
+
     /// 🚨 **Output-pixel ceiling for the image surface's single-pass path; above it, tile.**
     ///
     /// Measured 2026-07-29 (`mlxengine-todo/GAP-PROGRAM.md` **V10**). The stills path used to be
@@ -67,6 +81,7 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
                 defaultScale: Int = 2,
                 tileSize: Int = 256,
                 tileOverlap: Int = 32,
+                tileHalo: Int = 0,
                 imageWholeFramePixels: Int = 1024 * 1024,
                 snapshotDirectory: URL? = nil,
                 modelsRootDirectory: URL? = nil,
@@ -78,6 +93,7 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
         self.defaultScale = defaultScale
         self.tileSize = tileSize
         self.tileOverlap = tileOverlap
+        self.tileHalo = tileHalo
         self.imageWholeFramePixels = imageWholeFramePixels
         self.snapshotDirectory = snapshotDirectory
         self.modelsRootDirectory = modelsRootDirectory
@@ -96,6 +112,6 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     // absolute snapshot path) are excluded from `Codable` — the engine re-stamps them per session.
     private enum CodingKeys: String, CodingKey {
         case quant, repoOverride, seed, colorCorrect, defaultScale, tileSize, tileOverlap
-        case imageWholeFramePixels
+        case tileHalo, imageWholeFramePixels
     }
 }

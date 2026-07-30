@@ -39,16 +39,19 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
     private let colorCorrect: Bool
     private let tileSize: Int
     private let tileOverlap: Int
+    private let tileHalo: Int
     private let wholeFramePixels: Int
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
 
     init(upscaler: SeedVR2Upscaler, seed: UInt64, colorCorrect: Bool,
-         tileSize: Int = 256, tileOverlap: Int = 32, wholeFramePixels: Int = 1024 * 1024) {
+         tileSize: Int = 256, tileOverlap: Int = 32, tileHalo: Int = 0,
+         wholeFramePixels: Int = 1024 * 1024) {
         self.upscaler = upscaler
         self.seed = seed
         self.colorCorrect = colorCorrect
         self.tileSize = tileSize
         self.tileOverlap = tileOverlap
+        self.tileHalo = tileHalo
         self.wholeFramePixels = wholeFramePixels
     }
 
@@ -111,21 +114,37 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
         // slice can sit up to 7 px off the tile's true position. Sub-cell, edge-tiles-only — accepted.
         // The field is padded up to the tile latent so a tile larger than the image (skinny inputs)
         // still slices in bounds; the excess only ever lands under edge-replicated padding pixels.
+        //
+        // 🔑 **Halo (context padding), and how the noise field stays consistent under it.** With
+        // `tileHalo > 0` each tile is refined over a `(tileSize + 2·halo)²` window of real neighbouring
+        // content (the tiler crops the margin off the output). The noise field is drawn over the image
+        // *padded by `halo` on every side* — so a window whose top-left sits at `(x − halo, y − halo)`
+        // in image space sits at `(x, y)` in padded space, and the slice origin stays the unpadded tile
+        // origin. Two neighbouring windows overlap on the same padded-field cells, which keeps the
+        // noise they share identical — the same continuity contract the un-haloed field has. (Field
+        // *realization* differs between halo widths — same seed, different tensor extent — which the
+        // noise-chain measurements bounded at jitter level.)
+        let halo = tileHalo
+        let windowSize = tileSize + 2 * halo
         precondition(tileSize % 16 == 0, "tileSize \(tileSize) must be /16 (VAE 8× + patch/window)")
-        let tileLat = tileSize / 8
-        let fieldH = max((height + 7) / 8, tileLat), fieldW = max((width + 7) / 8, tileLat)
+        precondition(halo >= 0 && halo % 8 == 0 && windowSize % 16 == 0,
+                     "tileHalo \(halo) must be a non-negative multiple of 8 keeping tile+2·halo /16")
+        let windowLat = windowSize / 8
+        let fieldH = max((height + 2 * halo + 7) / 8, windowLat)
+        let fieldW = max((width + 2 * halo + 7) / 8, windowLat)
         let wholeNoise = SeedVR2LatentCreator.noiseLatents(seed: seed, height: fieldH, width: fieldW)
         eval(wholeNoise)
 
-        let out = try tiler.process(buffer) { tile, region in
+        let out = try tiler.process(buffer, halo: halo) { tile, region in
             // Per-tile cancellation: with tiling there IS a mid-run seam, unlike the single-pass branch.
             try Task.checkCancellation()
-            let ly = min(region.y / 8, fieldH - tileLat), lx = min(region.x / 8, fieldW - tileLat)
-            let noise = wholeNoise[0..., 0..., 0..., ly ..< (ly + tileLat), lx ..< (lx + tileLat)]
-            let style = tile.transposed(0, 3, 1, 2) * 2 - 1              // [1,3,th,tw] in [-1,1]
+            let ly = min(region.y / 8, fieldH - windowLat), lx = min(region.x / 8, fieldW - windowLat)
+            let noise = wholeNoise[0..., 0..., 0..., ly ..< (ly + windowLat), lx ..< (lx + windowLat)]
+            let style = tile.transposed(0, 3, 1, 2) * 2 - 1              // [1,3,win,win] in [-1,1]
             var refined = model.upscale(processedImage: style, noise: noise)
             if refined.ndim == 5 { refined = refined[0..., 0..., 0] }
-            // 🚨 **NO per-tile colour transfer — see `colorCorrect` below.**
+            // 🚨 **NO per-tile colour transfer — see `colorCorrect` below.** The full window is
+            // returned; the tiler crops the halo margin before feather-blending the centre.
             let result = clip((refined + 1) * 0.5, min: 0, max: 1).transposed(0, 2, 3, 1)
             eval(result)
             return result

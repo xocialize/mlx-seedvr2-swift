@@ -125,6 +125,7 @@ public final class SeedVR2UpscalePackage: ModelPackage {
                                            colorCorrect: configuration.colorCorrect,
                                            tileSize: configuration.tileSize,
                                            tileOverlap: configuration.tileOverlap,
+                                           tileHalo: configuration.tileHalo,
                                            wholeFramePixels: configuration.imageWholeFramePixels)
         frameRefiner = SeedVR2FrameRefiner(upscaler: model,
                                            tileSize: configuration.tileSize,
