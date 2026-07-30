@@ -28,12 +28,21 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
 
     /// **Halo (context padding) for the image surface's tiled refine, in output pixels per side.**
     ///
-    /// Overlap blends tile *outputs* that already disagree; a halo makes them agree in the first
-    /// place: each tile is refined over `(tileSize + 2·tileHalo)²` of REAL surrounding image content
-    /// and the margin is cropped off the output, so the windowed attention actually sees the tile's
-    /// neighbourhood instead of a border. This targets the measured residual of the V10 fix — the
-    /// per-tile-context disagreement that survived all three noise constructions (the tile lattice at
-    /// the `tileSize − tileOverlap` stride and the flat-region chroma speckle).
+    /// Each tile is refined over `(tileSize + 2·tileHalo)²` of REAL surrounding image content and
+    /// the margin is cropped off the output — the windowed attention sees the tile's neighbourhood
+    /// instead of a border. Overlap blends outputs that already disagree; halo makes the calls see
+    /// the same neighbourhood so they *could* agree.
+    ///
+    /// 🚨 **MEASURED NULL — do not re-try as a seam fix** (2026-07-30, GAP-PROGRAM V10-fix,
+    /// `probes/v10fix_halo.out`). Swept 0/32/64/96 px on the flattest graphic + a photo master:
+    /// every artefact axis flat (seam comb, 224-stride lattice power, chroma HF, flat-MAE) at up
+    /// to **2.5× the run time and +1.2 GB**. The disproof, not just the null: the error folded on
+    /// the 224 write grid is identical to ±0.03 across the sweep, and per-write-cell DC errors
+    /// correlate **0.97–0.996 between halo 0 and halo 96** — the same tiles wrong the same way
+    /// with 256² vs 448² of context. The residual is a deterministic, content-determined
+    /// low-frequency bias with *global* in-window sensitivity; no finite halo can make two
+    /// differently-placed calls agree. Kept because the machinery is correct and cheap at 0, and
+    /// because the lever being present WITH its receipt is what stops the next re-derivation.
     ///
     /// ⚠️ Not free: at `tileSize` 256 a 64 px halo refines 384² per tile — 2.25× the pixels.
     /// Must keep `tileSize + 2·tileHalo` a multiple of 16 (VAE 8× + patch/window), i.e. `tileHalo`
