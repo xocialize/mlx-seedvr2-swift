@@ -114,6 +114,37 @@ final class VAETemporalRoundTripTests: XCTestCase {
         XCTAssertTrue(vae.streamingMemoryTails().isEmpty)
     }
 
+    /// **The reset-at-cut property (GAP-PROGRAM N11).** A chunk run as `.initializing` after
+    /// `resetStreamingMemory()` mid-clip must be *bit-identical* to the same chunk run from a
+    /// freshly constructed VAE — that equivalence is the whole basis for treating a scene cut as a
+    /// clip boundary. If a reset left any residue, the post-cut shot would still be conditioned on
+    /// the pre-cut one, which is the artefact the row exists to remove.
+    func testResetMidClipIsEquivalentToColdStart() {
+        let vae = SeedVR2VAE()
+        let shotA = MLXRandom.uniform(low: -1.0, high: 1.0, [1, 3, 9, 32, 32], key: MLXRandom.key(21))
+        let shotB = MLXRandom.uniform(low: -1.0, high: 1.0, [1, 3, 9, 32, 32], key: MLXRandom.key(22))
+
+        // Run shot A so the memory bank is fully populated, then reset and run shot B.
+        vae.resetStreamingMemory()
+        let a = vae.decode(vae.encode(shotA, memoryState: .initializing), memoryState: .initializing)
+        eval([a] + vae.streamingMemoryTails())
+        XCTAssertFalse(vae.streamingMemoryTails().isEmpty, "shot A must leave state to clear")
+
+        vae.resetStreamingMemory()
+        XCTAssertTrue(vae.streamingMemoryTails().isEmpty, "the flush clears every conv's tail")
+        let afterReset = vae.decode(vae.encode(shotB, memoryState: .initializing), memoryState: .initializing)
+
+        // The same shot B through a VAE that never saw shot A at all.
+        let fresh = SeedVR2VAE()
+        fresh.resetStreamingMemory()
+        let cold = fresh.decode(fresh.encode(shotB, memoryState: .initializing), memoryState: .initializing)
+        eval(afterReset, cold)
+
+        XCTAssertEqual(afterReset.shape, cold.shape)
+        XCTAssertEqual(abs(afterReset - cold).max().item(Float.self), 0,
+                       "a post-reset chunk must carry NOTHING from the previous shot")
+    }
+
     /// T = 1 with the memory machinery present is bit-identical to T = 1 without it: `.disabled`
     /// takes the original replicate-pad expression and records nothing.
     func testSingleFrameUnaffectedByStreamingSurface() {

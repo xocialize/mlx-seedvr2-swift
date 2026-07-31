@@ -64,6 +64,28 @@ public final class SeedVR2Upscaler {
     /// multiple of 4 (its latents no longer carry the first-frame special case). `.disabled` —
     /// what the two signatures above pass — is the single-pass path, unchanged.
     ///
+    /// 🚨 **A scene cut is a clip boundary, and the driver must END THE CHUNK AT IT** — not merely
+    /// reset at the next chunk join. Measured (GAP-PROGRAM N11 Task 3,
+    /// `mlxengine-todo/probes/n11_reset_at_cut.out`), splicing two shots and comparing against the
+    /// T=1 control, mean |ΔL*| over the 8 frames after the cut:
+    ///
+    /// | driver behaviour | post-cut |ΔL*| |
+    /// |---|---|
+    /// | no reset — carries shot A's tail into shot B | 4.13 |
+    /// | reset, cut landed **mid-chunk** (flush at the next join) | 2.83 |
+    /// | reset, chunk **ended at the cut** | **1.37** |
+    ///
+    /// The contamination is visible, not just numeric: the first frames of the new shot inherit the
+    /// previous shot's colour cast and a ghosted luminance smear, decaying over ~10 frames. A
+    /// mid-chunk cut cannot be repaired by flushing afterwards — the frames inside the straddling
+    /// chunk were *jointly* processed with the old shot and come out bit-identical to the no-reset
+    /// arm. So the cut detector drives **chunking**, not just the reset.
+    ///
+    /// ⚠️ The 4k+1 arithmetic does not close under splitting: if the whole clip is exactly
+    /// expressible then the two segments either side of a cut cannot both be, so a cut always
+    /// leaves one ragged segment. Pad its final chunk with a repeat of the last real frame and trim
+    /// the extra outputs — never feed a padded frame forward into another chunk's memory.
+    ///
     /// ⚠️ Only the VAE streams; the diffusion transformer still sees one chunk at a time. Pass
     /// `noise: nil` (or the same `seed`) per chunk — do NOT reach for the tiled stills path's
     /// one-field-sliced-per-tile trick here. Measured (V12-S §4c) it is WORSE on both statistics,
