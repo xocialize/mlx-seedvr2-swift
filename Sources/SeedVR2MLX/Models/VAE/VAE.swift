@@ -156,4 +156,33 @@ public final class SeedVR2VAE: Module {
     public func streamingMemoryTails() -> [MLXArray] {
         causalConvs.compactMap(\.memory.tail)
     }
+
+    /// Snapshot the current streaming state (every causal conv's tail, in `causalConvs` order).
+    ///
+    /// **Why this exists: one VAE, several interleaved temporal streams.** A tiled temporal
+    /// driver refines the same clip tile position by tile position, and each spatial tile is its
+    /// own causal stream — carrying tile A's tails into tile B's chunk would condition B on A's
+    /// pixels. The driver exports the bank after each tile's chunk and adopts that tile's bank
+    /// before its next one. Reference-copy cheap; the arrays themselves are the settled tails.
+    public func exportStreamingMemory() -> VAEStreamingBank {
+        VAEStreamingBank(tails: causalConvs.map(\.memory.tail))
+    }
+
+    /// Install a previously exported streaming state (`nil` clears — same as
+    /// ``resetStreamingMemory()``). The bank must come from a VAE with the same architecture;
+    /// tails are re-installed positionally onto `causalConvs`.
+    public func adoptStreamingMemory(_ bank: VAEStreamingBank?) {
+        guard let bank else { return resetStreamingMemory() }
+        precondition(bank.tails.count == causalConvs.count,
+                     "streaming bank holds \(bank.tails.count) tails; VAE has \(causalConvs.count) causal convs")
+        for (conv, tail) in zip(causalConvs, bank.tails) { conv.memory.tail = tail }
+    }
+}
+
+/// Opaque snapshot of a `SeedVR2VAE`'s streaming memory (see
+/// ``SeedVR2VAE/exportStreamingMemory()``). One bank per independent temporal stream — e.g. one
+/// per spatial tile position in a tiled temporal driver.
+public final class VAEStreamingBank {
+    let tails: [MLXArray?]
+    init(tails: [MLXArray?]) { self.tails = tails }
 }

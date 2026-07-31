@@ -170,10 +170,10 @@ public final class SeedVR2UpscalePackage: ModelPackage {
         return ImageUpscaleResponse(image: out, appliedScale: scale)
     }
 
-    // MARK: - videoUpscale (streamed, tile-refined per frame)
+    // MARK: - videoUpscale (temporal-chunked by default; per-frame at temporalWindow == 1)
 
     private func runVideo(_ request: any CapabilityRequest) async throws -> any CapabilityResponse {
-        guard let frameRefiner else { throw PackageError.notLoaded }
+        guard let frameRefiner, let upscaler else { throw PackageError.notLoaded }
         guard let req = request as? VideoUpscaleRequest else {
             throw PackageError.unsupportedCapability(request.capability)
         }
@@ -192,20 +192,54 @@ public final class SeedVR2UpscalePackage: ModelPackage {
             try? FileManager.default.removeItem(at: outURL)
         }
 
+        // Effective temporal window: the config knob rounded down to legal (1 or 4k+1), then
+        // clamped down the measured memory ladder when the governor stamped a budget.
+        let info = try await NativeFrameStream.probe(url: inURL)
+        let effectiveT = Self.effectiveTemporalWindow(
+            requested: configuration.temporalWindow,
+            budgetBytes: configuration.availableBudgetBytes,
+            outputWidth: info.width * scale, outputHeight: info.height * scale,
+            tileSize: configuration.tileSize, tileOverlap: configuration.tileOverlap)
+
         // FFmpeg-free streaming decode→transform→encode (frame-stream-native): AVFoundation
-        // AVAssetReader (BGRA) → per-frame refine → HEVC/BT.709 encode, memory bounded. Native
-        // containers only (mp4/mov/m4v); non-native input must be normalized upstream.
-        // Per-frame refine is profiled (MLX_PROFILE=1) — the tile-bound diffusion transient is the
-        // memory peak; the region's phys/⚠PAGING readings separate compute-bound from paging.
+        // AVAssetReader (BGRA) → refine → HEVC/BT.709 encode, memory bounded. Native containers
+        // only (mp4/mov/m4v); non-native input must be normalized upstream.
         let prof = MLXProfiler.shared
-        prof.beginRun("seedvr2 videoUpscale scale=\(scale)")
+        prof.beginRun("seedvr2 videoUpscale scale=\(scale) T=\(effectiveT)")
         let frameNo = FrameCounter()
-        let meta = try await NativeFrameStream.run(
-            input: inURL, output: outURL, timing: .preserveSource
-        ) { frame in
-            try Task.checkCancellation()
-            let i = frameNo.next()
-            return [try prof.region("video", "frame", index: i) { try frameRefiner.refine(frame, factor: scale) }]
+        let meta: NativeFrameStream.Output
+        if effectiveT == 1 {
+            // The pre-temporal per-frame path, unchanged (bit-identical to v0.7.x). The
+            // SEEDVR2_TEMPORAL_DUMP diagnostic mirrors the temporal driver's so a receipt can
+            // compare arms pre-encode (see SeedVR2TemporalRefiner).
+            let dump = SeedVR2TemporalDump()
+            meta = try await NativeFrameStream.run(
+                input: inURL, output: outURL, timing: .preserveSource
+            ) { frame in
+                try Task.checkCancellation()
+                let i = frameNo.next()
+                let out = try prof.region("video", "frame", index: i) { try frameRefiner.refine(frame, factor: scale) }
+                dump.frame(out)
+                return [out]
+            }
+            dump.finish()
+        } else {
+            // V12-D temporal chunking driver: T-frame windows, streaming VAE memory across the
+            // joins (V12-S), early window termination + flush at detected scene cuts (N11).
+            let temporal = SeedVR2TemporalRefiner(
+                upscaler: upscaler, temporalWindow: effectiveT, scale: scale,
+                tileSize: configuration.tileSize, tileOverlap: configuration.tileOverlap,
+                colorCorrect: configuration.colorCorrect, seed: configuration.seed)
+            meta = try await NativeFrameStream.run(
+                input: inURL, output: outURL, timing: .preserveSource,
+                timedTransform: { frame, pts in
+                    try Task.checkCancellation()
+                    let i = frameNo.next()
+                    return try prof.region("video", "frame", index: i) {
+                        try temporal.ingest(frame, pts: pts)
+                    }
+                },
+                timedFlush: { try temporal.flush() })
         }
         prof.endRun(denominators: ["frame": Double(max(frameNo.value, 1))])
 
@@ -214,6 +248,42 @@ public final class SeedVR2UpscalePackage: ModelPackage {
             video: Video(format: .mp4, data: data,
                          durationSeconds: meta.sourceDuration, frameRate: meta.sourceFrameRate),
             appliedScale: scale)
+    }
+
+    /// The effective temporal window for a clip: the config knob rounded DOWN to legal, then —
+    /// when the governor stamped `availableBudgetBytes` — clamped down the V12-S measured
+    /// ladder. "Gate in app for what the machine is capable of", as one dial.
+    ///
+    /// The ladder (one 256² tile stream, MLX cache capped at 2 GiB, `phys_footprint`):
+    /// T = 1/5/9/13 → 7.82 / 9.83 / 11.78 / 13.47 GiB. Each ADDITIONAL tile position holds its
+    /// own streaming bank — 784 MiB per 256² stream, constant in T — so the estimate charges
+    /// ladder(T) + (tiles − 1) × 0.82 GiB. ⚠️ An estimate anchored to single-tile measurements
+    /// (V12-S §5b), not a per-geometry measurement; the per-tile activation transient is
+    /// serialized and does not multiply.
+    nonisolated static func effectiveTemporalWindow(requested: Int, budgetBytes: UInt64?,
+                                                    outputWidth: Int, outputHeight: Int,
+                                                    tileSize: Int, tileOverlap: Int) -> Int {
+        let legal = TemporalWindowPlanner.effectiveWindow(requested)
+        guard legal > 1, let budgetBytes else { return legal }
+
+        let step = max(tileSize - tileOverlap, 1)
+        func count(_ extent: Int) -> Int {
+            var origins = Set<Int>()
+            for o in stride(from: 0, to: extent, by: step) {
+                origins.insert(min(o, max(0, extent - tileSize)))
+            }
+            return origins.count
+        }
+        let tiles = count(outputWidth) * count(outputHeight)
+        let ladder: [Int: Double] = [1: 7.82, 5: 9.83, 9: 11.78, 13: 13.47]
+        let budgetGiB = Double(budgetBytes) / 1_073_741_824
+        var t = min(legal, 13)
+        while t > 1 {
+            let need = (ladder[t] ?? 13.47) + Double(max(tiles - 1, 0)) * 0.82
+            if need <= budgetGiB { return t }
+            t = t == 5 ? 1 : t - 4
+        }
+        return 1
     }
 }
 

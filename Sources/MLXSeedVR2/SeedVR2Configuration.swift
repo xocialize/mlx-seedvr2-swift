@@ -26,6 +26,25 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     public var tileSize: Int
     public var tileOverlap: Int
 
+    /// **Temporal window for the video surface, in frames (V12-D).** The video path schedules
+    /// decoded frames into windows of this length and runs each window through the temporal VAE
+    /// with streaming memory across the joins (V12-S), ending a window **early** at a detected
+    /// scene cut and flushing the stream (N11 — a mid-window cut cannot be repaired afterwards;
+    /// the straddling frames come out bit-identical to no-reset).
+    ///
+    /// Legal values are `1` and `4k+1` (5, 9, 13 …) — the causal VAE's first-chunk arithmetic;
+    /// any other value is rounded **down** to the nearest legal one. `1` is the pre-temporal
+    /// per-frame path, bit-identical to v0.7.x. Default **9**: the measured 16 GB operating
+    /// point at 256² tiles (V12-S: 11.78 GiB capped-cache, boundary max |ΔL*| 0.3071). The
+    /// ladder, one 256² tile stream, MLX cache capped at 2 GiB: T = 1/5/9/13 →
+    /// 7.82 / 9.83 / 11.78 / 13.47 GiB `phys_footprint`.
+    ///
+    /// ⚠️ Each additional spatial tile position carries its own streaming bank (~784 MiB per
+    /// 256² stream, constant in T) — frame size multiplies the memory, not just T. When the
+    /// engine stamps `availableBudgetBytes`, the video path clamps the effective window down
+    /// the measured ladder (never up past this knob) using the tile count of the actual clip.
+    public var temporalWindow: Int
+
     /// **Halo (context padding) for the image surface's tiled refine, in output pixels per side.**
     ///
     /// Each tile is refined over `(tileSize + 2·tileHalo)²` of REAL surrounding image content and
@@ -88,6 +107,7 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
                 seed: UInt64 = 0,
                 colorCorrect: Bool = true,
                 defaultScale: Int = 2,
+                temporalWindow: Int = 9,
                 tileSize: Int = 256,
                 tileOverlap: Int = 32,
                 tileHalo: Int = 0,
@@ -100,6 +120,7 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
         self.seed = seed
         self.colorCorrect = colorCorrect
         self.defaultScale = defaultScale
+        self.temporalWindow = temporalWindow
         self.tileSize = tileSize
         self.tileOverlap = tileOverlap
         self.tileHalo = tileHalo
@@ -120,7 +141,24 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     // Persist only the portable knobs; environment-specific fields (stamped roots, budget, an
     // absolute snapshot path) are excluded from `Codable` — the engine re-stamps them per session.
     private enum CodingKeys: String, CodingKey {
-        case quant, repoOverride, seed, colorCorrect, defaultScale, tileSize, tileOverlap
-        case tileHalo, imageWholeFramePixels
+        case quant, repoOverride, seed, colorCorrect, defaultScale, temporalWindow
+        case tileSize, tileOverlap, tileHalo, imageWholeFramePixels
+    }
+
+    // Persisted configs from before v0.8.0 have no `temporalWindow` key — decode it as the
+    // pre-temporal default rather than failing the whole config.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(quant: try c.decode(Quant.self, forKey: .quant),
+                  repoOverride: try c.decodeIfPresent(String.self, forKey: .repoOverride),
+                  seed: try c.decode(UInt64.self, forKey: .seed),
+                  colorCorrect: try c.decode(Bool.self, forKey: .colorCorrect),
+                  defaultScale: try c.decode(Int.self, forKey: .defaultScale),
+                  temporalWindow: try c.decodeIfPresent(Int.self, forKey: .temporalWindow) ?? 9,
+                  tileSize: try c.decode(Int.self, forKey: .tileSize),
+                  tileOverlap: try c.decode(Int.self, forKey: .tileOverlap),
+                  tileHalo: try c.decodeIfPresent(Int.self, forKey: .tileHalo) ?? 0,
+                  imageWholeFramePixels: try c.decodeIfPresent(Int.self, forKey: .imageWholeFramePixels)
+                      ?? 1024 * 1024)
     }
 }

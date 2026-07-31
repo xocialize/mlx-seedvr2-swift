@@ -24,7 +24,12 @@ let package = Package(
     dependencies: [
         // ≥ 0.27.0: CAN cancellation gate (MLXServeConformance.CancellationConformance).
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.27.0"),
-        .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.3.0"),
+        // ≥ 0.4.0: timed N:M transform (per-output PTS) — the temporal chunking driver buffers
+        // windows of frames and must hand each output its own recorded source PTS.
+        .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.4.0"),
+        // MediaMeasure.SceneCutDetector (N11) — the shipping cut detector the temporal driver
+        // consumes; a detected cut ends the current window early and flushes the VAE stream.
+        .package(url: "https://github.com/xocialize/media-bridge.git", from: "0.11.0"),
         .package(url: "https://github.com/xocialize/mlx-profiling.git", from: "0.1.0"),
         // RealESRGANMLX now ships from the consolidated mlx-realesrgan-swift (was realesrgan-mlx-swift, archived).
         // ≥ 0.6.0: region-aware MLXTileProcessor.process (tile origins for the continuous noise field).
@@ -61,6 +66,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
                 .product(name: "FrameStreamNative", package: "frame-stream-native"),
+                .product(name: "MediaMeasure", package: "media-bridge"),
                 .product(name: "MLXProfiling", package: "mlx-profiling"),
                 "SeedVR2MLX",
                 .product(name: "RealESRGANMLX", package: "mlx-realesrgan-swift"),
