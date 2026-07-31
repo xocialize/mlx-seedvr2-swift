@@ -58,9 +58,18 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
 
     /// Buffered window: each entry is OUR OWN Lanczos-upscaled BGRA buffer plus the source PTS.
     private var window: [(frame: CVPixelBuffer, pts: CMTime)] = []
-    /// Per-tile-position streaming banks, in tile raster order (nil until a tile's first
-    /// `.initializing` chunk has run). Rebuilt (as nils) on every stream flush.
-    private var banks: [VAEStreamingBank?] = []
+    /// Per-tile-position streaming banks, in tile raster order (absent until a tile's first
+    /// `.initializing` chunk has run). Cleared on every stream flush.
+    ///
+    /// 🔑 **Budgeted, because bank residency is `positions × ~0.765 GiB` and that is the ceiling on
+    /// large outputs** (`GAP-PROGRAM.md` V12-B): 6.9 GiB at a 512² output, 26.8 GiB at SD ×2 — more
+    /// than a 16 GB machine has. With `bankBudgetBytes` set, only what fits stays in memory and the
+    /// rest round-trips through a scratch directory, bit-identically.
+    ///
+    /// ⚠️ **Default is `nil` — no eviction, nothing written, behaviour identical to v0.8.0.** Eviction
+    /// costs SSD write volume (roughly 800 GiB for a 10 s SD ×2 clip), so it is a way to run a job that
+    /// otherwise could not run, never a blanket optimisation.
+    private var banks: StreamingBankResidency
     /// Frame index of the next source frame (diagnostics).
     private var frameIndex = 0
     private var emitted = 0
@@ -75,9 +84,12 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
     private var chunkLengths: [Int] = []
 
     init(upscaler: SeedVR2Upscaler, temporalWindow: Int, scale: Int, tileSize: Int,
-         tileOverlap: Int, colorCorrect: Bool, seed: UInt64, sceneCutDetection: Bool = true) {
+         tileOverlap: Int, colorCorrect: Bool, seed: UInt64, sceneCutDetection: Bool = true,
+         bankBudgetBytes: Int? = nil, bankSpillDirectory: URL? = nil) throws {
         precondition(temporalWindow >= 5 && temporalWindow % 4 == 1,
                      "temporal refiner needs a 4k+1 window ≥ 5; T=1 routes to the per-frame path")
+        self.banks = try StreamingBankResidency(budgetBytes: bankBudgetBytes,
+                                                directory: bankSpillDirectory)
         self.upscaler = upscaler
         self.planner = TemporalWindowPlanner(window: temporalWindow)
         self.scale = scale
@@ -148,7 +160,6 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
         let width = CVPixelBufferGetWidth(frames[0].frame)
         let height = CVPixelBufferGetHeight(frames[0].frame)
         let grid = tileGrid(width: width, height: height)
-        if banks.count != grid.count { banks = Array(repeating: nil, count: grid.count) }
 
         log("chunk frames=\(chunk.frameCount) padded=\(chunk.paddedCount) "
             + "state=\(chunk.memoryState == .active ? "active" : "init") "
@@ -174,7 +185,8 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
 
             // This tile position's own causal stream. `.initializing` reads no memory (cold
             // pad), but adopt anyway so a stale tail from another tile can never be read.
-            upscaler.vae.adoptStreamingMemory(chunk.memoryState == .active ? banks[tileIndex] : nil)
+            upscaler.vae.adoptStreamingMemory(
+                chunk.memoryState == .active ? try banks.take(at: tileIndex) : nil)
 
             let stack = extractTileStack(frames: frames.map(\.frame), padded: padded, tile: tile,
                                          frameWidth: width, frameHeight: height)
@@ -187,11 +199,8 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
             refined = clip((refined[0..., 0..., 0 ..< n] + 1) * 0.5, min: 0, max: 1)
             eval(refined)
 
-            if chunk.endsSegment {
-                banks[tileIndex] = nil
-            } else {
-                banks[tileIndex] = upscaler.vae.exportStreamingMemory()
-            }
+            try banks.store(chunk.endsSegment ? nil : upscaler.vae.exportStreamingMemory(),
+                            at: tileIndex)
 
             accumulate(refined.asArray(Float.self), frames: n, tile: tile,
                        frameWidth: width, frameHeight: height,
@@ -220,7 +229,7 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
 
     /// The stream ends (cut or clip end): drop every tile's bank and the VAE's live tails.
     private func flushStream() {
-        banks = Array(repeating: nil, count: banks.count)
+        banks.reset()
         upscaler.vae.resetStreamingMemory()
     }
 

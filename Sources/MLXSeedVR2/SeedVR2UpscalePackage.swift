@@ -228,11 +228,13 @@ public final class SeedVR2UpscalePackage: ModelPackage {
             // joins (V12-S), early window termination + flush at detected scene cuts (N11).
             // SEEDVR2_SCENECUT=off is a measurement diagnostic (the false-positive-cost A/B in
             // the V12-D receipt), not a product switch — cut handling is default-on.
-            let temporal = SeedVR2TemporalRefiner(
+            let temporal = try SeedVR2TemporalRefiner(
                 upscaler: upscaler, temporalWindow: effectiveT, scale: scale,
                 tileSize: configuration.tileSize, tileOverlap: configuration.tileOverlap,
                 colorCorrect: configuration.colorCorrect, seed: configuration.seed,
-                sceneCutDetection: ProcessInfo.processInfo.environment["SEEDVR2_SCENECUT"] != "off")
+                sceneCutDetection: ProcessInfo.processInfo.environment["SEEDVR2_SCENECUT"] != "off",
+                bankBudgetBytes: configuration.bankResidencyBudgetBytes,
+                bankSpillDirectory: configuration.bankSpillDirectory)
             meta = try await NativeFrameStream.run(
                 input: inURL, output: outURL, timing: .preserveSource,
                 timedTransform: { frame, pts in

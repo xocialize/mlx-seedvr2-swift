@@ -102,6 +102,24 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     /// `nil` → no figure; load the configured `quant`.
     public var availableBudgetBytes: UInt64?
 
+    /// Byte budget for RESIDENT per-tile streaming banks on the video path. `nil` (default) keeps
+    /// every bank in memory — behaviour identical to v0.8.0, and nothing is ever written to disk.
+    ///
+    /// 🔑 **Set this when `tilePositions × ~0.765 GiB` will not fit** (`GAP-PROGRAM.md` V12-B):
+    /// 6.9 GiB at a 512² output, 26.8 GiB at SD ×2, 130 GiB at HD→4K. Banks over the budget round-trip
+    /// through `bankSpillDirectory` bit-identically, at a measured ~6–13% wall-clock cost that is
+    /// **independent of output size** (bank I/O and model compute both scale with tile count).
+    ///
+    /// ⚠️ **The real price is write volume, not latency** — roughly 800 GiB through the scratch volume
+    /// for a 10 s SD ×2 clip. This is how you run a job that otherwise could not run at all; it is not
+    /// a speed or a memory optimisation to enable by default. ⚠️ Note also that eviction only moves
+    /// `phys_footprint` because the engine caps the MLX buffer cache.
+    public var bankResidencyBudgetBytes: Int?
+
+    /// Where evicted banks are written. `nil` → a temporary directory removed when the run ends.
+    /// Point this at fast local storage; a network volume makes the round-trip dominate.
+    public var bankSpillDirectory: URL?
+
     public init(quant: Quant = .int8,
                 repoOverride: String? = nil,
                 seed: UInt64 = 0,
@@ -114,7 +132,9 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
                 imageWholeFramePixels: Int = 1024 * 1024,
                 snapshotDirectory: URL? = nil,
                 modelsRootDirectory: URL? = nil,
-                availableBudgetBytes: UInt64? = nil) {
+                availableBudgetBytes: UInt64? = nil,
+                bankResidencyBudgetBytes: Int? = nil,
+                bankSpillDirectory: URL? = nil) {
         self.quant = quant
         self.repoOverride = repoOverride
         self.seed = seed
@@ -128,6 +148,8 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
         self.snapshotDirectory = snapshotDirectory
         self.modelsRootDirectory = modelsRootDirectory
         self.availableBudgetBytes = availableBudgetBytes
+        self.bankResidencyBudgetBytes = bankResidencyBudgetBytes
+        self.bankSpillDirectory = bankSpillDirectory
     }
 
     /// The canonical repo for a quant (fp16 / int8 only).
@@ -138,8 +160,11 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     /// The effective weights repo for this configuration (override wins, else quant-derived).
     public var repo: String { repoOverride ?? Self.repo(for: quant) }
 
-    // Persist only the portable knobs; environment-specific fields (stamped roots, budget, an
-    // absolute snapshot path) are excluded from `Codable` — the engine re-stamps them per session.
+    // Persist only the portable knobs; environment-specific fields (stamped roots, budgets, absolute
+    // paths) are excluded from `Codable` — the engine re-stamps them per session. That deliberately
+    // includes `bankResidencyBudgetBytes` and `bankSpillDirectory`: a budget is a property of the
+    // MACHINE, not of the configuration, and persisting one would carry a 16 GB machine's eviction
+    // policy onto a 128 GB machine that has no need to spill anything.
     private enum CodingKeys: String, CodingKey {
         case quant, repoOverride, seed, colorCorrect, defaultScale, temporalWindow
         case tileSize, tileOverlap, tileHalo, imageWholeFramePixels
