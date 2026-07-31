@@ -37,29 +37,33 @@ public final class SeedVR2Upscaler {
         eval(transformer, vae)
     }
 
-    /// processedImage: [B,3,H,W] (or [B,3,1,H,W]) in [-1,1], dims padded to /16.
-    /// Returns the decoded latent image [B,3,H*?,W*?] (pre-crop, pre-color-correct).
+    /// processedImage: [B,3,H,W] (a single frame) or [B,3,T,H,W] (a causal frame stack,
+    /// T ≡ 1 mod 4 for an exact latent count) in [-1,1], spatial dims padded to /16.
+    /// Returns the decoded output, [B,3,T,H*?,W*?] — T frames in, T frames out.
     public func upscale(processedImage: MLXArray, seed: UInt64, numSteps: Int = 1) -> MLXArray {
         upscale(processedImage: processedImage, noise: nil, seed: seed, numSteps: numSteps)
     }
 
-    /// Variant taking pre-made noise latents ([B,16,1,h,w], matching the encoded latent's spatial
-    /// dims — i.e. H/8 × W/8 for the 8× VAE). A tiled host uses this to slice each tile's noise out
-    /// of ONE field drawn over the whole image, so the field is continuous across tile seams instead
-    /// of independently drawn (and therefore discontinuous) per tile. `noise: nil` draws from `seed`
-    /// sized to this call's latent — the single-pass behaviour, unchanged.
+    /// Variant taking pre-made noise latents ([B,16,latT,h,w], matching the encoded latent's
+    /// temporal and spatial dims — latT = 1 + (T-1)/4, h,w = H/8 × W/8 for the 8× VAE). A tiled
+    /// host uses this to slice each tile's noise out of ONE field drawn over the whole image, so
+    /// the field is continuous across tile seams instead of independently drawn (and therefore
+    /// discontinuous) per tile. `noise: nil` draws from `seed` sized to this call's latent — the
+    /// single-pass behaviour, unchanged.
     public func upscale(processedImage: MLXArray, noise: MLXArray?, seed: UInt64 = 0, numSteps: Int = 1) -> MLXArray {
-        let initial = vae.encode(processedImage)                 // [B,16,1,h,w]
-        let condition = SeedVR2LatentCreator.condition(initial)  // [B,17,1,h,w]
+        let initial = vae.encode(processedImage)                 // [B,16,latT,h,w]
+        let condition = SeedVR2LatentCreator.condition(initial)  // [B,17,latT,h,w]
         if let noise {
-            precondition(noise.shape[3] == initial.shape[3] && noise.shape[4] == initial.shape[4],
+            precondition(noise.shape[2] == initial.shape[2]
+                         && noise.shape[3] == initial.shape[3] && noise.shape[4] == initial.shape[4],
                          "noise \(noise.shape) does not match the encoded latent \(initial.shape)")
         }
-        var latents = noise ?? SeedVR2LatentCreator.noiseLatents(seed: seed, height: initial.shape[3], width: initial.shape[4])
+        var latents = noise ?? SeedVR2LatentCreator.noiseLatents(seed: seed, height: initial.shape[3], width: initial.shape[4],
+                                                                 latentFrames: initial.shape[2])
 
         let scheduler = SeedVR2EulerScheduler(numInferenceSteps: numSteps)
         for t in 0 ..< scheduler.numSteps {
-            let modelInput = concatenated([latents, condition], axis: 1)   // [B,33,1,h,w]
+            let modelInput = concatenated([latents, condition], axis: 1)   // [B,33,latT,h,w]
             let pred = transformer(modelInput, textEmb, timestep: scheduler.timesteps[t])
             latents = scheduler.step(noise: pred, timestepIdx: t, latents: latents)
             eval(latents)

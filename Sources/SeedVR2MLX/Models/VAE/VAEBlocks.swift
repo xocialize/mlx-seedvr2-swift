@@ -101,7 +101,14 @@ public final class Upsample3D: Module {
         var h = upscaleConv(x)
         h = h.reshaped([B, sf, sf, tf, C, T, H, W]).transposed(0, 4, 5, 3, 6, 1, 7, 2)
         h = h.reshaped([B, C, T * tf, H * sf, W * sf])
-        if T == 1 && tf > 1 { h = h[0..., 0..., 0 ..< 1] }
+        // Causal `remove_head` (SeedVR video_vae_v3 causal_inflation_lib, times = tf-1): frame 0
+        // keeps only its FIRST temporal duplicate, frames 1.. keep all — T*tf -> 2T-1, the inverse
+        // of the encoder's replicate-front-pad downsample. The upstream mflux port gated this on
+        // T == 1 (its only case), which left the video path decoding 4x latT frames.
+        if tf > 1 {
+            h = T == 1 ? h[0..., 0..., 0 ..< 1]
+                       : concatenated([h[0..., 0..., 0 ..< 1], h[0..., 0..., tf...]], axis: 2)
+        }
         return conv(h)
     }
 }
