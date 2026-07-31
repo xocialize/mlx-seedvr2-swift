@@ -27,12 +27,14 @@ public final class ResnetBlock3D: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var h = conv1(silu(vaeGroupNorm(x, norm1)))
-        h = conv2(silu(vaeGroupNorm(h, norm2)))
-        let residual = convShortcut?(x) ?? x
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
+        var h = conv1(silu(vaeGroupNorm(x, norm1)), memoryState: memoryState)
+        h = conv2(silu(vaeGroupNorm(h, norm2)), memoryState: memoryState)
+        let residual = convShortcut?(x, memoryState: memoryState) ?? x
         return h + residual
     }
+
+    var causalConvs: [CausalConv3d] { [conv1, conv2] + (convShortcut.map { [$0] } ?? []) }
 }
 
 /// Attention3D — spatial self-attention within the VAE mid block.
@@ -78,10 +80,12 @@ public final class Downsample3D: Module {
             stride: (st, 2, 2), padding: (pt, 0, 0))
         super.init()
     }
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
         let padded = MLX.padded(x, widths: [.init((0, 0)), .init((0, 0)), .init((0, 0)), .init((0, 1)), .init((0, 1))])
-        return conv(padded)
+        return conv(padded, memoryState: memoryState)
     }
+
+    var causalConvs: [CausalConv3d] { [conv] }
 }
 
 public final class Upsample3D: Module {
@@ -95,22 +99,30 @@ public final class Upsample3D: Module {
         self._upscaleConv.wrappedValue = CausalConv3d(channels, channels * total, kernel: (1, 1, 1), padding: (0, 0, 0))
         super.init()
     }
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
         let s = x.shape
         let (B, C, T, H, W) = (s[0], s[1], s[2], s[3], s[4])
-        var h = upscaleConv(x)
+        var h = upscaleConv(x, memoryState: memoryState)
         h = h.reshaped([B, sf, sf, tf, C, T, H, W]).transposed(0, 4, 5, 3, 6, 1, 7, 2)
         h = h.reshaped([B, C, T * tf, H * sf, W * sf])
         // Causal `remove_head` (SeedVR video_vae_v3 causal_inflation_lib, times = tf-1): frame 0
         // keeps only its FIRST temporal duplicate, frames 1.. keep all — T*tf -> 2T-1, the inverse
         // of the encoder's replicate-front-pad downsample. The upstream mflux port gated this on
         // T == 1 (its only case), which left the video path decoding 4x latT frames.
-        if tf > 1 {
+        //
+        // Streaming: SeedVR's Upsample3D skips remove_head entirely when MemoryState.ACTIVE
+        // (`attn_video_vae.py`: `if self.temporal_up and memory_state != MemoryState.ACTIVE`).
+        // The dropped duplicate exists to undo the ENCODER's first-frame special case, which only
+        // the first chunk of a clip has — so a continuation chunk keeps all T*tf frames and
+        // latT latents decode to 4*latT frames, not 4*latT-3.
+        if tf > 1 && memoryState != .active {
             h = T == 1 ? h[0..., 0..., 0 ..< 1]
                        : concatenated([h[0..., 0..., 0 ..< 1], h[0..., 0..., tf...]], axis: 2)
         }
-        return conv(h)
+        return conv(h, memoryState: memoryState)
     }
+
+    var causalConvs: [CausalConv3d] { [upscaleConv, conv] }
 }
 
 public final class MidBlock3D: Module {
@@ -121,9 +133,13 @@ public final class MidBlock3D: Module {
         self._resnets.wrappedValue = [ResnetBlock3D(channels, channels), ResnetBlock3D(channels, channels)]
         super.init()
     }
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        resnets[1](attentions[0](resnets[0](x)))
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
+        // The attention is spatial-only (it folds T into the batch dim, matching the reference's
+        // `rearrange(h, "b c f h w -> (b f) c h w")` around the attn block) — no temporal state.
+        resnets[1](attentions[0](resnets[0](x, memoryState: memoryState)), memoryState: memoryState)
     }
+
+    var causalConvs: [CausalConv3d] { resnets.flatMap(\.causalConvs) }
 }
 
 public final class DownBlock3D: Module {
@@ -134,12 +150,14 @@ public final class DownBlock3D: Module {
         self._downsamplers.wrappedValue = addDownsample ? [Downsample3D(outCh, spatialOnly: !temporalDown)] : []
         super.init()
     }
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
         var h = x
-        for r in resnets { h = r(h) }
-        for d in downsamplers { h = d(h) }
+        for r in resnets { h = r(h, memoryState: memoryState) }
+        for d in downsamplers { h = d(h, memoryState: memoryState) }
         return h
     }
+
+    var causalConvs: [CausalConv3d] { resnets.flatMap(\.causalConvs) + downsamplers.flatMap(\.causalConvs) }
 }
 
 public final class UpBlock3D: Module {
@@ -150,10 +168,12 @@ public final class UpBlock3D: Module {
         self._upsamplers.wrappedValue = addUpsample ? [Upsample3D(outCh, temporalUp: temporalUp)] : []
         super.init()
     }
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
         var h = x
-        for r in resnets { h = r(h) }
-        for u in upsamplers { h = u(h) }
+        for r in resnets { h = r(h, memoryState: memoryState) }
+        for u in upsamplers { h = u(h, memoryState: memoryState) }
         return h
     }
+
+    var causalConvs: [CausalConv3d] { resnets.flatMap(\.causalConvs) + upsamplers.flatMap(\.causalConvs) }
 }

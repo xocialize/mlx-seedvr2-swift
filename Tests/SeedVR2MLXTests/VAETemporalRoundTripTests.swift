@@ -61,6 +61,71 @@ final class VAETemporalRoundTripTests: XCTestCase {
         XCTAssertEqual(abs(y4 - y5).max().item(Float.self), 0)
     }
 
+    /// Streaming memory (V12-S): a clip cut into chunks round-trips to the same frame count as
+    /// the same clip in one pass, and the causal arithmetic differs per chunk exactly as SeedVR's
+    /// `slicing_encode` / `slicing_decode` require — first chunk 4k+1 frames -> latT k+1 -> 4k+1
+    /// frames back, every later chunk 4k frames -> latT k -> 4k frames back (no `remove_head`,
+    /// because only the first chunk carries the encoder's first-frame special case).
+    func testStreamingChunkedRoundTrip() {
+        let vae = SeedVR2VAE()
+        for (first, rest) in [(5, 4), (9, 8), (13, 12)] {
+            vae.resetStreamingMemory()
+            var total = 0
+            for (i, t) in [first, rest, rest].enumerated() {
+                let state: VAEMemoryState = i == 0 ? .initializing : .active
+                let x = MLXArray.zeros([1, 3, t, 32, 32], type: Float.self)
+                let z = vae.encode(x, memoryState: state)
+                eval(z)
+                XCTAssertEqual(z.shape[2], i == 0 ? 1 + (t - 1) / 4 : t / 4,
+                               "stream chunk \(i) (T=\(t)): latT")
+                let y = vae.decode(z, memoryState: state)
+                eval([y] + vae.streamingMemoryTails())
+                XCTAssertEqual(y.shape[2], t, "stream chunk \(i) (T=\(t)): frames in == frames out")
+                XCTAssertEqual(y.shape[3], 32); XCTAssertEqual(y.shape[4], 32)
+                total += t
+            }
+            XCTAssertEqual(total, first + 2 * rest)
+        }
+    }
+
+    /// Streaming actually carries state: with memory ACTIVE the second chunk differs from the
+    /// same frames processed cold, and the difference is the head — the join is where the cold
+    /// replicate pad used to be. (Zeros would be invariant, so this needs real content.)
+    func testStreamingSecondChunkDiffersFromColdChunk() {
+        let vae = SeedVR2VAE()
+        let clip = MLXRandom.uniform(low: -1.0, high: 1.0, [1, 3, 9, 32, 32], key: MLXRandom.key(7))
+        let (head, tail) = (clip[0..., 0..., 0 ..< 5], clip[0..., 0..., 5 ..< 9])
+
+        vae.resetStreamingMemory()
+        _ = { let z = vae.encode(head, memoryState: .initializing)
+              eval([vae.decode(z, memoryState: .initializing)] + vae.streamingMemoryTails()) }()
+        let streamed = vae.decode(vae.encode(tail, memoryState: .active), memoryState: .active)
+
+        vae.resetStreamingMemory()
+        let cold = vae.decode(vae.encode(tail, memoryState: .initializing), memoryState: .initializing)
+        eval(streamed, cold)
+
+        XCTAssertEqual(streamed.shape[2], 4)
+        XCTAssertNotEqual(cold.shape[2], streamed.shape[2],
+                          "a cold 4-frame chunk decodes 4*(latT-1)+1 = 1 frame; streamed keeps 4")
+        // And the memory bank is populated after a streaming pass but empty after a reset.
+        XCTAssertFalse(vae.streamingMemoryTails().isEmpty)
+        vae.resetStreamingMemory()
+        XCTAssertTrue(vae.streamingMemoryTails().isEmpty)
+    }
+
+    /// T = 1 with the memory machinery present is bit-identical to T = 1 without it: `.disabled`
+    /// takes the original replicate-pad expression and records nothing.
+    func testSingleFrameUnaffectedByStreamingSurface() {
+        let vae = SeedVR2VAE()
+        let x = MLXRandom.uniform(low: -1.0, high: 1.0, [1, 3, 1, 32, 32], key: MLXRandom.key(11))
+        let a = vae.decode(vae.encode(x))
+        let b = vae.decode(vae.encode(x, memoryState: .disabled), memoryState: .disabled)
+        eval(a, b)
+        XCTAssertEqual(abs(a - b).max().item(Float.self), 0)
+        XCTAssertTrue(vae.streamingMemoryTails().isEmpty, "`.disabled` must record no state")
+    }
+
     /// The latent-creator surfaces are T-general: noise sized to latentFrames, condition mask
     /// spanning all latent frames (SeedVR get_condition task="sr" semantics).
     func testLatentCreatorTemporalShapes() {

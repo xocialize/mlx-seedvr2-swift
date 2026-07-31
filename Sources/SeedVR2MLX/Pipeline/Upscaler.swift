@@ -51,7 +51,27 @@ public final class SeedVR2Upscaler {
     /// discontinuous) per tile. `noise: nil` draws from `seed` sized to this call's latent — the
     /// single-pass behaviour, unchanged.
     public func upscale(processedImage: MLXArray, noise: MLXArray?, seed: UInt64 = 0, numSteps: Int = 1) -> MLXArray {
-        let initial = vae.encode(processedImage)                 // [B,16,latT,h,w]
+        upscale(processedImage: processedImage, noise: noise, seed: seed, numSteps: numSteps,
+                memoryState: .disabled)
+    }
+
+    /// Streaming variant: one chunk of a longer clip, with the causal VAE carrying its tail
+    /// features across the join (SeedVR `video_vae_v3` `MemoryState`).
+    ///
+    /// Drive a clip as `.initializing` for the first chunk then `.active` for the rest, and call
+    /// ``SeedVR2VAE/resetStreamingMemory()`` before starting another clip. Chunk lengths follow
+    /// the causal arithmetic: the first chunk is T ≡ 1 mod 4 frames, every later chunk is a
+    /// multiple of 4 (its latents no longer carry the first-frame special case). `.disabled` —
+    /// what the two signatures above pass — is the single-pass path, unchanged.
+    ///
+    /// ⚠️ Only the VAE streams; the diffusion transformer still sees one chunk at a time. Pass
+    /// `noise: nil` (or the same `seed`) per chunk — do NOT reach for the tiled stills path's
+    /// one-field-sliced-per-tile trick here. Measured (V12-S §4c) it is WORSE on both statistics,
+    /// because a fixed seed already gives every steady-state chunk the byte-identical field,
+    /// which is maximally stable; one long field gives each chunk DIFFERENT noise.
+    public func upscale(processedImage: MLXArray, noise: MLXArray?, seed: UInt64 = 0,
+                        numSteps: Int = 1, memoryState: VAEMemoryState) -> MLXArray {
+        let initial = vae.encode(processedImage, memoryState: memoryState)  // [B,16,latT,h,w]
         let condition = SeedVR2LatentCreator.condition(initial)  // [B,17,latT,h,w]
         if let noise {
             precondition(noise.shape[2] == initial.shape[2]
@@ -68,6 +88,8 @@ public final class SeedVR2Upscaler {
             latents = scheduler.step(noise: pred, timestepIdx: t, latents: latents)
             eval(latents)
         }
-        return vae.decode(latents)
+        // `vae.encode` / `vae.decode` each settle their own streaming tails — see
+        // ``SeedVR2VAE/settle(_:_:_:)`` for why the timing matters.
+        return vae.decode(latents, memoryState: memoryState)
     }
 }

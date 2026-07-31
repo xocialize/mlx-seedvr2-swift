@@ -29,12 +29,16 @@ public final class Encoder3D: Module {
         super.init()
     }
 
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var h = convIn(x)
-        for b in downBlocks { h = b(h) }
-        h = midBlock(h)
+    public func callAsFunction(_ x: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
+        var h = convIn(x, memoryState: memoryState)
+        for b in downBlocks { h = b(h, memoryState: memoryState) }
+        h = midBlock(h, memoryState: memoryState)
         h = silu(vaeGroupNorm(h, convNormOut))
-        return convOut(h)
+        return convOut(h, memoryState: memoryState)
+    }
+
+    var causalConvs: [CausalConv3d] {
+        [convIn] + downBlocks.flatMap(\.causalConvs) + midBlock.causalConvs + [convOut]
     }
 }
 
@@ -65,12 +69,16 @@ public final class Decoder3D: Module {
         super.init()
     }
 
-    public func callAsFunction(_ z: MLXArray) -> MLXArray {
-        var h = convIn(z)
-        h = midBlock(h)
-        for b in upBlocks { h = b(h) }
+    public func callAsFunction(_ z: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
+        var h = convIn(z, memoryState: memoryState)
+        h = midBlock(h, memoryState: memoryState)
+        for b in upBlocks { h = b(h, memoryState: memoryState) }
         h = silu(vaeGroupNorm(h, convNormOut))
-        return convOut(h)
+        return convOut(h, memoryState: memoryState)
+    }
+
+    var causalConvs: [CausalConv3d] {
+        [convIn] + midBlock.causalConvs + upBlocks.flatMap(\.causalConvs) + [convOut]
     }
 }
 
@@ -87,17 +95,65 @@ public final class SeedVR2VAE: Module {
     }
 
     /// x [B,3,T,H,W] (or [B,3,H,W]) -> latent [B,16,T,H/8,W/8].
-    public func encode(_ xIn: MLXArray) -> MLXArray {
+    ///
+    /// `memoryState` drives SeedVR's streaming mode (`slicing_encode`): `.initializing` for the
+    /// first chunk of a clip (T ≡ 1 mod 4 — it carries the causal first-frame special case),
+    /// `.active` for every chunk after (T ≡ 0 mod 4, latT = T/4). `.disabled` — the default — is
+    /// the single-pass path and is bit-identical to the pre-streaming code.
+    public func encode(_ xIn: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
         let x = xIn.ndim == 4 ? xIn.expandedDimensions(axis: 2) : xIn
-        let h = encoder(x)
+        let h = encoder(x, memoryState: memoryState)
         let mean = h[0..., 0 ..< latentChannels]
-        return mean * scalingFactor
+        let out = mean * scalingFactor
+        settle(out, encoder.causalConvs, memoryState)
+        return out
     }
 
     /// z [B,16,T,H,W] -> image [B,3,T,H*8,W*8].
-    public func decode(_ zIn: MLXArray) -> MLXArray {
+    ///
+    /// Frame count follows the memory state, exactly as `slicing_decode` does: `.disabled` /
+    /// `.initializing` give the causal inverse 4·(latT−1)+1, `.active` gives 4·latT (the
+    /// first-frame duplicate is only dropped on the chunk that has one).
+    public func decode(_ zIn: MLXArray, memoryState: VAEMemoryState = .disabled) -> MLXArray {
         var z = zIn.ndim == 4 ? zIn.expandedDimensions(axis: 2) : zIn
         z = z / scalingFactor
-        return decoder(z)
+        let out = decoder(z, memoryState: memoryState)
+        settle(out, decoder.causalConvs, memoryState)
+        return out
+    }
+
+    /// Materialise a stage's output together with the streaming tails it just produced.
+    ///
+    /// 🚨 Scope, not tidiness. A tail is a lazy slice of a conv input, so an unevaluated tail pins
+    /// that entire activation. Evaluating the ENCODER's tails only at the end of `upscale` held
+    /// every encoder intermediate alive across the diffusion step and the whole decode: measured
+    /// at 256²/T=5, peak `phys_footprint` 21.24 -> 20.13 GiB (uncapped MLX buffer cache) when
+    /// each stage settles its own instead. Doing it here costs nothing — the tails share the
+    /// output's graph, so this is the eval that was going to happen anyway, at the right moment.
+    ///
+    /// ⚠️ Neither this nor `.contiguous()` is what makes the streaming path affordable: most of
+    /// that 20 GiB is MLX buffer cache, not working set. Bounded at 2 GiB (what the shipping
+    /// engine does) the same run is 9.83 GiB, of which the tails are 784 MiB. See V12-S §5.
+    private func settle(_ out: MLXArray, _ convs: [CausalConv3d], _ memoryState: VAEMemoryState) {
+        guard memoryState != .disabled else { return }
+        eval([out] + convs.compactMap(\.memory.tail))
+    }
+
+    /// Every causal conv that carries streaming state, encoder then decoder.
+    var causalConvs: [CausalConv3d] { encoder.causalConvs + decoder.causalConvs }
+
+    /// Drop all streaming tails — call between clips (or when abandoning one part-way).
+    public func resetStreamingMemory() {
+        for c in causalConvs { c.memory.tail = nil }
+    }
+
+    /// The streaming tails as arrays, for the caller to `eval` alongside the chunk output.
+    ///
+    /// Each tail is a lazy slice of a conv input, so leaving it unevaluated pins that whole
+    /// intermediate — up to a full-resolution decoder activation — alive until the next chunk.
+    /// Evaluating them with the output costs nothing extra (they share its graph) and drops
+    /// everything but the few frames actually retained.
+    public func streamingMemoryTails() -> [MLXArray] {
+        causalConvs.compactMap(\.memory.tail)
     }
 }
