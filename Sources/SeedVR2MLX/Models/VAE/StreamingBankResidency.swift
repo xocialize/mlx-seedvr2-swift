@@ -10,18 +10,28 @@
 // whole machine, and neither tile size nor the temporal window moves it (both measured dead, and pinned
 // in `VAEStreamingBankSizeTests`).
 //
-// 🔑 **Why this is affordable, measured rather than assumed.** Per tile position per output frame the
-// model costs **0.363 s** (V12-D: 3.27 s/frame at 9 tile positions, 0.335 s at one — linear within 8%),
-// while a bank round-trip is 0.821 GB out and back, ~0.19 s at this machine's measured 8.74 GB/s
-// fsync'd write. Both terms scale with the tile count, so **the overhead ratio is independent of output
-// size: ~6% on an 8-frame chunk, ~13% on a 4-frame one.**
+// 🔑 **What it costs, MEASURED end to end** (`probes/v12b2_bank_eviction.out`, 17 frames at 40 tile
+// positions through the shipping surface, arm A bracketed before and after arm B):
 //
-// ⚠️ **An earlier revision of the V12-B write-up put this at 2.7× and concluded chunk-major offload was
-// unaffordable.** That compared I/O at 170 tile positions against a compute figure measured at 9 —
-// compute scales with tile count too. The correction is why this ships as an addition to the existing
-// driver rather than the loop-order restructure that was scoped on the strength of the wrong number.
-// Tile-major iteration would still amortise this ~7× further (to ~1%), which is now a refinement, not
-// an enabler.
+//     peak footprint  42.02 GiB → 12.69 GiB   (3.31×, and 16 GB becomes reachable)
+//     wall clock      227 s mean → 335.6 s    (**+48%**, at a 1 GiB budget = 39 of 40 banks spilling)
+//     output          max |Δ| = 0 over 18 frames — bit-identical
+//
+// 🚨 **That +48% is the THIRD cost estimate for this work, and the first one measured. The two before
+// it were wrong in opposite directions, both for the same reason.** V12-B said "2.7×, offload cannot
+// work" by comparing I/O at 170 tile positions against compute measured at 9. The pre-measurement
+// estimate here said "~6–13%" by dividing bank bytes by RAW DISK BANDWIDTH. **A ratio of two
+// quantities measured separately, under different conditions, is not a measurement — measure the
+// composite.**
+//
+// 🔑 **Where the 48% goes, and why it is headroom rather than a floor:** 59.7 GiB written + 59.7 GiB
+// read in 108.6 s is ~1.27 GB/s effective, against 8.74 GB/s fsync'd write measured on the same
+// volume. **The round trip is SERIALIZATION-bound, not bandwidth-bound** — 57 separate tensors per
+// bank through safetensors framing plus host materialization per array. A contiguous single-buffer
+// bank format is the obvious first move if this ever blocks anything. Not attempted.
+//
+// ⚠️ 1 GiB is the EXTREME budget. A host should set the largest budget that fits, not the smallest
+// that works; overhead falls as fewer banks spill.
 //
 // ⚠️ **The real cost of eviction is WRITE VOLUME, not latency.** A 10 s 24 fps clip at SD ×2 spills
 // roughly 800 GiB through the scratch volume. That is why eviction is **budget-driven and off by

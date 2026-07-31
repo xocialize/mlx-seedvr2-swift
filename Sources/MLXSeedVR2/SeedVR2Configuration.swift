@@ -107,8 +107,11 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     ///
     /// 🔑 **Set this when `tilePositions × ~0.765 GiB` will not fit** (`GAP-PROGRAM.md` V12-B):
     /// 6.9 GiB at a 512² output, 26.8 GiB at SD ×2, 130 GiB at HD→4K. Banks over the budget round-trip
-    /// through `bankSpillDirectory` bit-identically, at a measured ~6–13% wall-clock cost that is
-    /// **independent of output size** (bank I/O and model compute both scale with tile count).
+    /// through `bankSpillDirectory` **bit-identically** (max |Δ| = 0 over 18 frames, measured end to
+    /// end at 40 tile positions) at a measured **~48%** wall-clock cost with a 1 GiB budget —
+    /// `probes/v12b2_bank_eviction.out`. ⚠️ 1 GiB is the extreme setting, spilling 39 of 40 banks; set
+    /// the largest budget that fits and the overhead falls. 🚨 Two earlier published estimates for this
+    /// (2.7× and ~6–13%) were both derived from component measurements rather than a composite run.
     ///
     /// ⚠️ **The real price is write volume, not latency** — roughly 800 GiB through the scratch volume
     /// for a 10 s SD ×2 clip. This is how you run a job that otherwise could not run at all; it is not
