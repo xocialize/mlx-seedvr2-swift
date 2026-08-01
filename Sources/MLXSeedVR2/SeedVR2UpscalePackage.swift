@@ -134,6 +134,15 @@ public final class SeedVR2UpscalePackage: ModelPackage {
                                            seed: configuration.seed)
     }
 
+    /// Bank residency counters from the most recent temporal video run — nil before any run and on
+    /// the per-frame (T=1) path, which holds no banks. 🔑 **This is the receipt surface V12-B3 named
+    /// as a probe gap**: with eviction enabled, `bytesSpilled` is the SSD-wear number (measured
+    /// 59.7 GiB for 17 frames at 40 tile positions at a 1 GiB budget) that was previously only
+    /// reconstructable by hand. Also emitted as a `flush` line in the `SEEDVR2_TEMPORAL_LOG`
+    /// diagnostic. Eviction OFF (the default) reads as spills=0 / bytesSpilled=0 — a cheap
+    /// assertion that a machine with headroom truly wrote nothing.
+    public private(set) var lastVideoBankStatistics: StreamingBankResidency.Statistics?
+
     public func unload() async {
         upscaler = nil
         imageRefiner = nil
@@ -245,6 +254,7 @@ public final class SeedVR2UpscalePackage: ModelPackage {
                     }
                 },
                 timedFlush: { try temporal.flush() })
+            lastVideoBankStatistics = temporal.bankStatistics
         }
         prof.endRun(denominators: ["frame": Double(max(frameNo.value, 1))])
 

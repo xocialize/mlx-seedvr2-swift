@@ -137,6 +137,12 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
         return out
     }
 
+    /// Bank residency counters for the run so far — the receipt numbers V12-B3 had to
+    /// hand-account (59.7 GiB of spill traffic, reconstructed from chunk arithmetic because
+    /// nothing surfaced it). `bytesSpilled` is the SSD-wear figure a host should show before
+    /// enabling eviction on a long clip.
+    var bankStatistics: StreamingBankResidency.Statistics { banks.statistics }
+
     /// End of clip: run the buffered tail (padded to the next legal length, pad outputs
     /// trimmed) and release everything.
     func flush() throws -> [(CVPixelBuffer, CMTime)] {
@@ -145,7 +151,9 @@ final class SeedVR2TemporalRefiner: @unchecked Sendable {
             out += try run(chunk: tail)
         }
         dump.finish(chunkLengths: chunkLengths)
-        log("flush emitted=\(emitted)")
+        let stats = banks.statistics
+        log("flush emitted=\(emitted) bankHits=\(stats.hits) bankLoads=\(stats.loads) "
+            + "bankSpills=\(stats.spills) bankBytesSpilled=\(stats.bytesSpilled)")
         return out
     }
 
