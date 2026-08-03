@@ -10,25 +10,27 @@
 // whole machine, and neither tile size nor the temporal window moves it (both measured dead, and pinned
 // in `VAEStreamingBankSizeTests`).
 //
-// 🔑 **What it costs, MEASURED end to end** (`probes/v12b2_bank_eviction.out`, 17 frames at 40 tile
-// positions through the shipping surface, arm A bracketed before and after arm B):
+// 🔑 **What it costs, MEASURED end to end — twice** (`probes/v12b2_bank_eviction.out` 2026-07-31;
+// REMEASURED with repeated arms in both orders + cooldowns, `probes/v12b3g_bank_granule_io.out`
+// 2026-08-03):
 //
-//     peak footprint  42.02 GiB → 12.69 GiB   (3.31×, and 16 GB becomes reachable)
-//     wall clock      227 s mean → 335.6 s    (**+48%**, at a 1 GiB budget = 39 of 40 banks spilling)
-//     output          max |Δ| = 0 over 18 frames — bit-identical
+//     peak footprint  41.83–42.04 GiB → 12.68–12.74 GiB   (3.31×, and 16 GB becomes reachable)
+//     wall clock      ≈+7% at a 1 GiB budget (arm spread 0–19%; baselines 225/244 s, evicted 241–267 s)
+//     output          max |Δ| = 0 over 18 frames — bit-identical, re-confirmed across 7 arms
 //
-// 🚨 **That +48% is the THIRD cost estimate for this work, and the first one measured. The two before
-// it were wrong in opposite directions, both for the same reason.** V12-B said "2.7×, offload cannot
-// work" by comparing I/O at 170 tile positions against compute measured at 9. The pre-measurement
-// estimate here said "~6–13%" by dividing bank bytes by RAW DISK BANDWIDTH. **A ratio of two
-// quantities measured separately, under different conditions, is not a measurement — measure the
-// composite.**
+// 🚨 **Cost-figure history, kept honest: 2.7× → ~6–13% → +48% → ≈+7% (current).** V12-B's "2.7×,
+// offload cannot work" compared I/O at 170 tile positions against compute measured at 9; the "~6–13%"
+// divided bank bytes by raw disk bandwidth; the +48% measured the composite but ran the treatment arm
+// ONCE and it absorbed session drift — the remeasure's four evicted arms all run 20–28% below it with
+// matching baselines. **Measure the composite, AND repeat the arms — a bracketed baseline cannot
+// rescue an unrepeated treatment.**
 //
-// 🔑 **Where the 48% goes, and why it is headroom rather than a floor:** 59.7 GiB written + 59.7 GiB
-// read in 108.6 s is ~1.27 GB/s effective, against 8.74 GB/s fsync'd write measured on the same
-// volume. **The round trip is SERIALIZATION-bound, not bandwidth-bound** — 57 separate tensors per
-// bank through safetensors framing plus host materialization per array. A contiguous single-buffer
-// bank format is the obvious first move if this ever blocks anything. Not attempted.
+// 🚨 **"Serialization-bound" was the +48% receipt's explanation, and it is FALSIFIED:** a contiguous
+// single-buffer bank format (BlockStreamKit `GranuleSpillFile`, branch `granule-bank-store`) A/B'd
+// through the shipping path is composite-invisible — the round trip runs at disk rate on BOTH
+// transports on a 128 GB host. The branch's remaining case is memory-constrained machines, where
+// THIS store's buffered IO pushes the whole spill volume through the page cache and the branch's
+// F_NOCACHE path is invariant by construction; that 16 GB-arm composite is the open receipt.
 //
 // ⚠️ 1 GiB is the EXTREME budget. A host should set the largest budget that fits, not the smallest
 // that works; overhead falls as fewer banks spill.
