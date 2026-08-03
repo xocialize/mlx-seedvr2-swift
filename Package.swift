@@ -36,6 +36,10 @@ let package = Package(
         .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.6.4"),
         .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.32.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
+        // GranuleIO ONLY (not the streamer): the contiguous activation spill file under
+        // `VAEStreamingBank` (V12-B3 ⑤ — the safetensors bank round trip was serialization-bound;
+        // ≥ 0.4.0 is the GranuleIO product split).
+        .package(url: "https://github.com/xocialize/mlx-block-stream-swift.git", from: "0.4.0"),
     ],
     targets: [
         // Engine-agnostic core (folded in from seedvr2-mlx-swift) — NO MLXToolKit dep.
@@ -46,6 +50,7 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
+                .product(name: "GranuleIO", package: "mlx-block-stream-swift"),
             ],
             path: "Sources/SeedVR2MLX",
             // Core was authored in Swift 5 (tools 5.9); keep v5 mode in this 6.2 package.

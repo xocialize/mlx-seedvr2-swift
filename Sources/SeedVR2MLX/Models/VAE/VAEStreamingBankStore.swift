@@ -10,6 +10,19 @@
 // product's two named customer segments and fits on nothing we own. The banks are pure carry-over
 // state, touched once per boundary, so the way past it is to keep only the active one resident.
 //
+// 🔑 **The format is `GranuleSpillFile` (BlockStreamKit's `GranuleIO` product), not safetensors,**
+// because V12-B3 measured the safetensors round trip SERIALIZATION-bound: 59.7 GiB out + 59.7 GiB
+// back in 108.6 s ≈ 1.27 GB/s effective against the same volume's 8.74 GB/s raw — ~7× under, from
+// 57-tensors-per-bank framing + per-array host materialization — and that made eviction cost +48%
+// wall clock. The spill file is the "contiguous single-buffer bank format" that receipt named:
+// one aligned file per bank, payloads written straight from unified memory and pread straight back
+// into it. Semantics here are UNCHANGED — same count sentinel, same refusal behaviour, same
+// bit-identity contract; only the transport moved.
+//
+// ⚠️ `SEEDVR2_BANK_STORE_LEGACY=1` restores the safetensors transport. It exists so the composite
+// cost of the format itself can be A/B-measured through the shipping surface (the V12-B3 lesson:
+// a ratio of two separately-measured quantities is not a measurement) — it is not a product switch.
+//
 // ⚠️ **Offloading is necessary in EITHER loop ordering, and by itself it is not sufficient.** Under the
 // driver's current chunk-major iteration every bank round-trips once per chunk (~9 frames), which at 4K
 // is ~29 GiB/frame of I/O against ~3.3 s/frame of compute. Tile-major iteration amortises the same
@@ -21,6 +34,7 @@
 // only once the pool is over its cap. `PORT-QUEUE.md` cross-cutting note 3 — *set `GPU.set(cacheLimit:)`,
 // never `memoryLimit`* — is what makes eviction real rather than bookkeeping.
 import Foundation
+import GranuleIO
 import MLX
 
 extension VAEStreamingBank {
@@ -31,48 +45,82 @@ extension VAEStreamingBank {
     /// `causalConvs` and preconditions on the count. A bank whose trailing nils were dropped would
     /// fail that precondition, and one whose interior nils collapsed would silently install every
     /// tail onto the wrong conv — which is why the count is stored explicitly rather than inferred
-    /// from the highest index present.
+    /// from the highest index present. (Legacy transport: a 1-element sentinel tensor. Spill
+    /// transport: the same key in the file's `userInfo` table.)
     private static let countKey = "__tail_count"
 
     private static func key(_ index: Int) -> String { "t\(index)" }
 
-    /// Write this bank to `url` (safetensors). Non-nil tails only; the count restores the shape.
+    /// Measurement-only escape back to the safetensors transport (see the header). Read once —
+    /// both directions of one process must speak the same format, or the refusal gate weakens.
+    static let legacyTransport =
+        ProcessInfo.processInfo.environment["SEEDVR2_BANK_STORE_LEGACY"] == "1"
+
+    /// Write this bank to `url` (contiguous granule spill file). Non-nil tails only; the count
+    /// restores the shape.
     ///
     /// ⚠️ **Evaluates the tails.** They are usually already settled — the driver exports after an
     /// `eval` — but a lazily-built tail would otherwise be written as an unevaluated graph.
     public func write(to url: URL) throws {
-        var arrays: [String: MLXArray] = [:]
+        var tensors: [(key: String, array: MLXArray)] = []
         for (i, tail) in tails.enumerated() {
             guard let tail else { continue }
-            arrays[Self.key(i)] = tail
+            tensors.append((Self.key(i), tail))
         }
-        eval(Array(arrays.values))
-        arrays[Self.countKey] = MLXArray([Int32(tails.count)])
-        try save(arrays: arrays, url: url)
+        if Self.legacyTransport {
+            eval(tensors.map(\.array))
+            var arrays = Dictionary(uniqueKeysWithValues: tensors)
+            arrays[Self.countKey] = MLXArray([Int32(tails.count)])
+            try save(arrays: arrays, url: url)
+        } else {
+            try GranuleSpillFile.write(
+                tensors: tensors,
+                userInfo: [Self.countKey: String(tails.count)],
+                to: url)
+        }
     }
 
     /// Read a bank previously written by ``write(to:)``.
     ///
-    /// - Throws: ``VAEStreamingBankStoreError/malformed(_:)`` if the count sentinel is missing or a
-    ///   stored index is out of range — a corrupt or foreign file, which must not be adopted into a
-    ///   VAE where it would be installed positionally onto the wrong convolutions.
+    /// - Throws: ``VAEStreamingBankStoreError/malformed(_:)`` if the file is not a spill file, the
+    ///   count sentinel is missing, or a stored index is out of range or duplicated — a corrupt or
+    ///   foreign file, which must not be adopted into a VAE where it would be installed positionally
+    ///   onto the wrong convolutions.
     public static func read(from url: URL) throws -> VAEStreamingBank {
-        let arrays = try loadArrays(url: url)
-        guard let countArray = arrays[countKey] else {
+        let named: [(String, MLXArray)]
+        let countString: String?
+        if legacyTransport {
+            let arrays = try loadArrays(url: url)
+            named = arrays.filter { $0.key != countKey }.map { ($0.key, $0.value) }
+            countString = arrays[countKey].map { String($0.item(Int32.self)) }
+        } else {
+            let contents: GranuleSpillFile.Contents
+            do {
+                contents = try GranuleSpillFile.read(from: url)
+            } catch let error as GranuleIOError {
+                // Structural refusal (bad magic/version/table) — OUR gate, one error surface.
+                throw VAEStreamingBankStoreError.malformed(String(describing: error))
+            }
+            named = contents.tensors
+            countString = contents.userInfo[countKey]
+        }
+        guard let countString, let count = Int(countString) else {
             throw VAEStreamingBankStoreError.malformed("missing \(countKey) — not a streaming bank")
         }
-        let count = Int(countArray.item(Int32.self))
         guard count >= 0 else {
             throw VAEStreamingBankStoreError.malformed("negative tail count \(count)")
         }
         var tails = [MLXArray?](repeating: nil, count: count)
-        for (name, array) in arrays where name != countKey {
+        for (name, array) in named {
             guard name.hasPrefix("t"), let index = Int(name.dropFirst()) else {
                 throw VAEStreamingBankStoreError.malformed("unexpected key \(name)")
             }
             guard index >= 0, index < count else {
                 throw VAEStreamingBankStoreError.malformed(
                     "tail index \(index) outside 0..<\(count) — the file does not match its own count")
+            }
+            guard tails[index] == nil else {
+                throw VAEStreamingBankStoreError.malformed("duplicate tail \(name)")
             }
             tails[index] = array
         }

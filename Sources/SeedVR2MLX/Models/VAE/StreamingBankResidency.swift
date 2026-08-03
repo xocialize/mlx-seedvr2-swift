@@ -107,7 +107,8 @@ public final class StreamingBankResidency {
     public var spilledCount: Int { spilled.count }
 
     private func url(_ index: Int) -> URL {
-        directory.appendingPathComponent("bank-\(index).safetensors")
+        directory.appendingPathComponent(
+            "bank-\(index).\(VAEStreamingBank.legacyTransport ? "safetensors" : "spill")")
     }
 
     /// Hand a tile position's bank to the residency. `nil` clears that position.
