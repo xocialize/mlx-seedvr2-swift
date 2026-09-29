@@ -34,7 +34,10 @@ let package = Package(
         // RealESRGANMLX now ships from the consolidated mlx-realesrgan-swift (was realesrgan-mlx-swift, archived).
         // ≥ 0.6.0: region-aware MLXTileProcessor.process (tile origins for the continuous noise field).
         .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.6.4"),
-        .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.32.0"),
+        // "..<0.33.0": admits 0.32.x — 0.32.2 carries the NAX split-K GEMM fix
+        // (mlx#3810) and is the floor of the next mlx-swift-lm — capped at the next
+        // unvalidated minor.
+        .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.33.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
     targets: [
