@@ -8,7 +8,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class VAEParityTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     func loadVAE(_ dir: URL) throws -> (SeedVR2VAE, [String: MLXArray]) {
         let weights = try loadArrays(url: dir.appendingPathComponent("vae.safetensors"))

@@ -14,7 +14,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class VAETemporalRoundTripTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     /// Encoder honours the causal rule and the decoder inverts it, T ∈ {1, 5, 9, 13}.
     func testEncodeDecodeFrameCountRoundTrip() {

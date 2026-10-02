@@ -10,7 +10,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class TransformerParityTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     func testFullTransformerTOut() throws {
         guard let dir = AttentionParityTests.dir else { throw XCTSkip("weights not found; set SEEDVR2_WEIGHTS_DIR") }

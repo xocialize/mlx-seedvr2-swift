@@ -28,7 +28,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class VAEStreamingBankSizeTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     /// Randomized parameters: tail shapes do not depend on weight values, but zeros would make any
     /// value-sensitive follow-up vacuous, and this matches the sibling suite's construction.

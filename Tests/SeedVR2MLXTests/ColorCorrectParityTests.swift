@@ -7,7 +7,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class ColorCorrectParityTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     func testLabTransferVsFinalImage() throws {
         guard let dir = AttentionParityTests.dir else { throw XCTSkip("weights not found") }

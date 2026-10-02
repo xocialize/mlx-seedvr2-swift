@@ -16,7 +16,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class VAEStreamingBankStoreTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     private func tempURL() -> URL {
         FileManager.default.temporaryDirectory

@@ -5,12 +5,9 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class SmokeTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
-        // CPU stream needs no Metal default.metallib (sidesteps the SPM-CLI error)
-        // and is the correct device for parity (Apple-GPU fp32 is tf32-like).
-        Device.setDefault(device: Device(.cpu))
-    }
+    // CPU stream needs no Metal default.metallib (sidesteps the SPM-CLI error)
+    // and is the correct device for parity (Apple-GPU fp32 is tf32-like).
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     func testConfigDefaults() {
         XCTAssertEqual(SeedVR2Config.r3B.vidDim, 2560)

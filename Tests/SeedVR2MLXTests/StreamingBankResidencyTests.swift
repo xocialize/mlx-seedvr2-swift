@@ -12,7 +12,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class StreamingBankResidencyTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     /// Distinct, identifiable banks — value equality is what the round-trip assertions check.
     private func bank(_ id: Int, elements: Int = 4096) -> VAEStreamingBank {

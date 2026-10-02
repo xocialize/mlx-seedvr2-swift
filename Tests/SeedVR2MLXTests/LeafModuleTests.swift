@@ -7,10 +7,7 @@ import XCTest
 /// Shape/finite smoke tests for the mechanical leaf modules (run on CPU via xcodebuild).
 /// Numerical parity vs goldens lands once the full transformer is assembled.
 final class LeafModuleTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
-        Device.setDefault(device: Device(.cpu))
-    }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     func testSwiGLUHiddenDimAndShape() {
         let mlp = SwiGLUMLP(dim: 2560, expandRatio: 4)  // hidden should be 6912 (matches checkpoint)

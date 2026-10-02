@@ -11,7 +11,7 @@ import XCTest
 @testable import SeedVR2MLX
 
 final class VAEStreamingBankTests: XCTestCase {
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     /// A VAE with deterministic random parameters (zeros would make every value assertion
     /// vacuous — conv outputs would be identically zero regardless of state).

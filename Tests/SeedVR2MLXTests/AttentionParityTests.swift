@@ -20,7 +20,7 @@ final class AttentionParityTests: XCTestCase {
         return FileManager.default.fileExists(atPath: guess.appendingPathComponent("transformer.safetensors").path) ? guess : nil
     }
 
-    override func setUp() { super.setUp(); Device.setDefault(device: Device(.cpu)) }
+    override func invokeTest() { withMLXCPU { super.invokeTest() } }
 
     func loadBlock0(_ dir: URL) throws -> (TransformerBlock, [String: MLXArray]) {
         let all = try loadArrays(url: dir.appendingPathComponent("transformer.safetensors"))
