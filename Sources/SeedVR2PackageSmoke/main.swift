@@ -1,6 +1,8 @@
 import ArgumentParser
 import Foundation
 import MLX
+import MLXEngineTestKit
+import MLXServeCore
 import MLXToolKit
 import MLXSeedVR2
 
@@ -8,6 +10,12 @@ import MLXSeedVR2
 /// load() → run(ImageUpscaleRequest) → write the upscaled PNG. Proves the package envelope and
 /// reports the MLX activation peak for the footprint declaration (watchdog-safe component gate;
 /// the in-app phys_footprint is the admission basis and reads ~2.5–2.9× higher — re-baseline there).
+///
+/// `--engine-store <dir>` drives it through the real `MLXServeEngine` instead: register → prepare
+/// against a model store at `<dir>` (the engine materializes the declared weight source into the
+/// store's flat layout first, contract 1.24) → run. Prints `MLXEngineTestKit`'s `[MAT]` line and the
+/// resulting store layout; `--expect-download yes|no` turns the download-phase observation into an
+/// exit status (a fresh store must download; a store holding a v0.9.x snapshot must not).
 @main
 struct PackageSmoke: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -28,8 +36,15 @@ struct PackageSmoke: AsyncParsableCommand {
     var quant: String = "int8"
     @Flag(name: .long, help: "Disable LAB color correction.")
     var noColorCorrect = false
+    @Option(name: .long, help: "Model store root: drive register → prepare → run through MLXServeEngine (the engine materializes the weights here).")
+    var engineStore: String?
+    @Option(name: .long, help: "With --engine-store: require that prepare did (yes) or did not (no) surface a .downloading phase.")
+    var expectDownload: String?
 
     func run() async throws {
+        // Line-buffer stdout: a multi-GB download into a redirected log must stay visible live.
+        setvbuf(stdout, nil, _IOLBF, 0)
+
         let decl = SeedVR2UpscalePackage.manifest.license
         let gate = LicensePolicy.permissiveOnly.evaluate(decl)
         print("[pkg] license weight=\(decl.weightLicense) port=\(decl.portCodeLicense) → \(gate)")
@@ -40,14 +55,22 @@ struct PackageSmoke: AsyncParsableCommand {
             quant: q,
             colorCorrect: !noColorCorrect,
             snapshotDirectory: snapshot.map { URL(fileURLWithPath: $0) })
+        let capability: Capability = video != nil ? .videoUpscale : .imageUpscale
 
-        let pkg = SeedVR2UpscalePackage(configuration: cfg)
-        let loadStart = Date()
-        try await pkg.load()
-        MLX.GPU.clearCache()
-        let resident = Double(MLX.GPU.activeMemory) / 1e9
-        print(String(format: "[pkg] load → %.1fs, resident floor %.2f GB (quant=%@)",
-                     Date().timeIntervalSince(loadStart), resident, quant))
+        let execute: (any CapabilityRequest) async throws -> any CapabilityResponse
+        if let engineStore {
+            execute = try await prepareThroughEngine(cfg, capability: capability,
+                                                     root: URL(fileURLWithPath: engineStore, isDirectory: true))
+        } else {
+            let pkg = SeedVR2UpscalePackage(configuration: cfg)
+            let loadStart = Date()
+            try await pkg.load()
+            MLX.GPU.clearCache()
+            let resident = Double(MLX.GPU.activeMemory) / 1e9
+            print(String(format: "[pkg] load → %.1fs, resident floor %.2f GB (quant=%@)",
+                         Date().timeIntervalSince(loadStart), resident, quant))
+            execute = { try await pkg.run($0) }
+        }
 
         if let video {
             // videoUpscale surface — used by the V10-fix colour-match temporal A/B
@@ -57,7 +80,7 @@ struct PackageSmoke: AsyncParsableCommand {
             let req = VideoUpscaleRequest(video: Video(format: fmt, data: data), scale: scale)
             MLX.GPU.resetPeakMemory()
             let runStart = Date()
-            let resp = try await pkg.run(req)
+            let resp = try await execute(req)
             guard let r = resp as? VideoUpscaleResponse else { throw ExitCode(1) }
             try r.video.data.write(to: URL(fileURLWithPath: out))
             print(String(format: "[pkg] video run → scale=%d %.1fs dur=%.2fs fps=%.2f (peak %.2f GB) → %@",
@@ -75,11 +98,73 @@ struct PackageSmoke: AsyncParsableCommand {
 
         MLX.GPU.resetPeakMemory()
         let runStart = Date()
-        let resp = try await pkg.run(req)
+        let resp = try await execute(req)
         guard let r = resp as? ImageUpscaleResponse else { throw ExitCode(1) }
         try r.image.data.write(to: URL(fileURLWithPath: out))
         print(String(format: "[pkg] run → %dx%d scale=%d  (%.2fs, peak %.2f GB) → %@",
                      r.image.width ?? 0, r.image.height ?? 0, r.appliedScale,
                      Date().timeIntervalSince(runStart), Double(MLX.GPU.peakMemory) / 1e9, out))
+    }
+
+    /// register → prepare through `MLXServeEngine` with a model store at `root`; returns the run seam.
+    private func prepareThroughEngine(_ cfg: SeedVR2Configuration, capability: Capability,
+                                      root: URL) async throws -> (any CapabilityRequest) async throws -> any CapabilityResponse {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let engine = MLXServeEngine()
+        await engine.useModelStore(ModelStore(root: root))
+        let id = try await engine.register(SeedVR2UpscalePackage.registration, configuration: cfg)
+
+        // The configuration as the engine sees it at prepare (store root stamped).
+        var stamped = cfg
+        stamped.modelsRootDirectory = root
+        let repo = stamped.effectiveRepo
+        let flat = ModelStore(root: root).directory(for: repo)!
+        let legacy = SeedVR2Configuration.legacyStoreDirectory(storeRoot: root, repo: repo)
+        let needs = await engine.needsDownload(capability, package: id)
+        print("[pkg] engine store=\(root.path) repo=\(repo) needsDownload=\(needs) "
+              + "missing=\(stamped.missingWeightSources(storeRoot: root).map(\.role)) "
+              + "found=\(stamped.existingWeightsDirectory(storeRoot: root)?.path ?? "none")")
+
+        // Live download progress (the bench only tallies it): one line per 5%.
+        let printer = Task { @MainActor in
+            var lastBucket = -1
+            while !Task.isCancelled {
+                if case .downloading(let fraction, let bps) = engine.preparation.phase(for: capability,
+                                                                                      package: id.description) {
+                    let bucket = Int(fraction * 20)
+                    if bucket != lastBucket {
+                        lastBucket = bucket
+                        print(String(format: "[pkg] .downloading %5.1f%%  %@", fraction * 100,
+                                     bps.map { String(format: "%.1f MB/s", $0 / 1e6) } ?? "—"))
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+        let mat = try await MaterializationBench.run(
+            engine: engine, capability: capability, package: id, configuration: stamped,
+            sourceRepo: SeedVR2UpscalePackage.manifest.provenance.sourceRepo, storeRoot: root)
+        printer.cancel()
+        print(mat.logLine)
+
+        let sizes = SeedVR2Configuration.weightFiles.map { file -> String in
+            let size = (try? FileManager.default.attributesOfItem(
+                atPath: flat.appending(path: file).path)[.size] as? NSNumber)?.int64Value ?? 0
+            return "\(file)=\(size)"
+        }
+        let legacyPresent = FileManager.default.fileExists(atPath: legacy.path)
+        print("[pkg] layout flat=\(flat.path) [\(sizes.joined(separator: " "))] "
+              + "legacy=\(legacyPresent ? "PRESENT" : "absent") "
+              + "missingAfter=\(stamped.missingWeightSources(storeRoot: root).map(\.role))")
+
+        if let expectDownload {
+            let want = expectDownload == "yes"
+            guard mat.sawDownloadingPhase == want else {
+                print("[pkg] ❌ expected downloadPhase=\(want ? "yes" : "NO"), observed \(mat.sawDownloadingPhase ? "yes" : "NO")")
+                throw ExitCode(3)
+            }
+            print("[pkg] ✅ downloadPhase=\(want ? "yes" : "NO") as expected")
+        }
+        return { try await engine.run($0, package: id) }
     }
 }

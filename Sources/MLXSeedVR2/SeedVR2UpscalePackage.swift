@@ -40,10 +40,6 @@ private final class FrameCounter: @unchecked Sendable {
 public final class SeedVR2UpscalePackage: ModelPackage {
     public typealias Configuration = SeedVR2Configuration
 
-    /// fp16 needs ~7.5 GB resident + a multi-GB transient (≈11 GB working set); below this headroom
-    /// `BudgetAware` substitutes the near-lossless int8 repo (measured ~4.72 GB resident).
-    private static let fp16MinBudgetBytes: UInt64 = 11_000_000_000
-
     public nonisolated static var manifest: PackageManifest {
         PackageManifest(
             // SeedVR2 weights: Apache-2.0 (ByteDance-Seed). Port code: MIT. → permissive, no ack.
@@ -96,28 +92,12 @@ public final class SeedVR2UpscalePackage: ModelPackage {
     public func load() async throws {
         guard upscaler == nil else { return }   // idempotent (C13: re-loadable after unload)
 
-        // BudgetAware: int8 is near-lossless, so honor a tight stamped budget by substituting it.
-        var quant = configuration.quant
-        if quant == .fp16, let budget = configuration.availableBudgetBytes, budget < Self.fp16MinBudgetBytes {
-            quant = .int8
-        }
-
-        let model: SeedVR2Upscaler
-        if let snapshot = configuration.snapshotDirectory {
-            // Absolute pre-materialized snapshot — honored OVER the stamped root (Anima lesson).
-            model = try SeedVR2Upscaler(directory: snapshot)
-        } else if let root = configuration.modelsRootDirectory {
-            // Materialize into the engine model store via the core's own (swift-transformers-free)
-            // downloader; per-repo subdir so fp16 and int8 snapshots don't collide.
-            let repo = SeedVR2Configuration.repo(for: quant)
-            let dir = try HFHub.snapshot(
-                repoId: repo,
-                cacheDir: root.appending(path: "seedvr2-mlx/\(repo.replacingOccurrences(of: "/", with: "--"))",
-                                         directoryHint: .isDirectory))
-            model = try SeedVR2Upscaler(directory: dir)
-        } else {
-            model = try SeedVR2Upscaler(repoId: SeedVR2Configuration.repo(for: quant))   // default cache
-        }
+        // Contract 1.24: with a store attached the ENGINE has already materialized the declared
+        // source (`weightSources` — the BudgetAware-effective quant's repo) into the store's flat
+        // layout, with its `.downloading` phase. This only resolves the directory: the explicit
+        // snapshot (honored over the stamped root, the Anima lesson), else the store copy (adopting
+        // a v0.9.x in-store snapshot by rename — never a re-download), else the store-less core cache.
+        let model = try SeedVR2Upscaler(directory: configuration.materializedWeightsDirectory())
 
         upscaler = model
         imageRefiner = SeedVR2ImageRefiner(upscaler: model,

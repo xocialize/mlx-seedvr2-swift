@@ -11,7 +11,9 @@ import MLXToolKit
 public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantConfigured, BudgetAware {
     /// fp16 or int8 only. int8 is the validated default (near-lossless, ~4.7 GB vs ~7.5 GB).
     public var quant: Quant
-    /// Optional explicit weights repo; when `nil`, derived from `quant` (the canonical repos).
+    /// Optional explicit weights repo; when `nil`, derived from `quant` (the canonical repos). Since
+    /// v0.10.0 `load()` and the declared `weightSources` both honor it (v0.9.x declared it but always
+    /// loaded the quant's canonical repo).
     public var repoOverride: String?
     /// Diffusion seed — deterministic output per seed (MLX-Swift RNG parity).
     public var seed: UInt64
@@ -89,13 +91,18 @@ public struct SeedVR2Configuration: PackageConfiguration, ModelStorable, QuantCo
     public var imageWholeFramePixels: Int
 
     /// Absolute path to a pre-materialized weights snapshot (the directory holding
-    /// `transformer.safetensors` / `vae.safetensors` / `pos_emb.safetensors` / `config.json`).
-    /// **Honored OVER the engine-stamped `modelsRootDirectory`** — a stamped root is *appended to*
-    /// for the HF download, which would corrupt an already-absolute path (the Anima v0.1.1 lesson).
+    /// `transformer.safetensors` / `vae.safetensors` / `pos_emb.safetensors` / `config.json`) — the
+    /// dev-mode escape hatch. **Honored OVER the engine-stamped `modelsRootDirectory`** (the Anima
+    /// v0.1.1 lesson), and never touches the network: complete → nothing to materialize; incomplete →
+    /// the source reads as missing and `load()` fails on the absent file.
     public var snapshotDirectory: URL?
 
-    /// Where weights are materialized — set by the engine from its `ModelStore.root` (`ModelStorable`).
-    /// `nil` → the core's default cache (`~/Library/Caches/seedvr2-mlx`).
+    /// The engine's model store root (`ModelStorable`, stamped from `ModelStore.root`). Since v0.10.0
+    /// the ENGINE materializes `weightSources` here before `load()` (contract 1.24), in the store's flat
+    /// layout `<root>/models--mlx-community--SeedVR2-3B-mlx-int8/`; a v0.9.x snapshot at
+    /// `<root>/seedvr2-mlx/<org>--<name>/` is honored and adopted into that layout by rename (see
+    /// `SeedVR2WeightSourcing.swift`). `nil` → the core's own cache (`~/Library/Caches/seedvr2-mlx`),
+    /// downloaded by `load()` itself — the v0.9.x store-less behaviour, unchanged.
     public var modelsRootDirectory: URL?
 
     /// Real headroom this model is loading into, stamped by the governor at load time (`BudgetAware`).

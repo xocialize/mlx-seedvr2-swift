@@ -1,0 +1,49 @@
+name: ci
+
+# Build and test a CLEAN CLONE of the package: the guarantee a public SPM owes its consumers (ForgeCore
+# resolves this package by URL at a tag). Same shape as mlx-heart-swift's, ForgeCore's and
+# mlx-engine-swift's CI.
+#
+# BUILD SYSTEM (must stay pinned): the package links MLX, and MLX loads its Metal kernels from a
+# `default.metallib` compiled from Cmlx's `.metal` sources into a resource bundle beside the test binary.
+# Only the `swiftbuild` build system compiles those sources; the deprecated `native` one ships no metallib,
+# so the first allocator call aborts the whole xctest process (signal 5) while the log can still read
+# "all tests passed". Do not remove it.
+#
+# WHAT RUNS HERE, on the CPU stream and entirely from the repository: the leaf-module and smoke checks,
+# the streaming-bank memory model and bank store round-trips, the temporal window planner, the frame-
+# stream round-trip, and the offline conformance suites (C-suite manifest/surfaces, MAT-1..5 per quant
+# lane with the store layouts and the v0.9.x snapshot adoption, CAN-1..3 on both surfaces). The parity
+# suites (attention, transformer, VAE, pipeline, colour, int8 quantization) self-skip unless
+# SEEDVR2_WEIGHTS_DIR points at the weights + goldens; they and the GPU lanes (seedvr2-package-smoke,
+# including `--engine-store`, which downloads ~4.7 GB) run locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Toolchain
+        run: |
+          sw_vers
+          swift --version
+          # Informational: the metallib compile needs this component. The suites run on the CPU stream.
+          xcodebuild -showComponent MetalToolchain || echo "MetalToolchain component not reported"
+      - name: Build (all products)
+        run: swift build --build-system swiftbuild
+      - name: Test
+        run: swift test --build-system swiftbuild

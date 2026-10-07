@@ -7,7 +7,8 @@ import PackageDescription
 //   • seedvr2-upscale — the core's standalone CLI
 //   • MLXSeedVR2     — the MLXEngine ModelPackage: ONE SeedVR2UpscalePackage exposes BOTH
 //     imageUpscale (Export/diffusion tier) AND videoUpscale surfaces from one loaded 3B core.
-//   • seedvr2-package-smoke — drives the package through the engine's load()/run() seam (gate).
+//   • seedvr2-package-smoke — drives the package through the engine's load()/run() seam (gate);
+//     `--engine-store` drives it through the real MLXServeEngine against a model store instead.
 // Consolidated 2026-06-18: the former standalone `seedvr2-mlx-swift` core was folded in (archived).
 // The tile/feathered-seam machinery is shared from the consolidated `mlx-realesrgan-swift` (RealESRGANMLX).
 let package = Package(
@@ -22,8 +23,11 @@ let package = Package(
         .executable(name: "seedvr2-package-smoke", targets: ["SeedVR2PackageSmoke"]),
     ],
     dependencies: [
-        // ≥ 0.27.0: CAN cancellation gate (MLXServeConformance.CancellationConformance).
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.27.0"),
+        // ≥ 0.32.0: engine-executed weight materialization (contract 1.24) — the engine downloads the
+        // declared `WeightSourcing` source into the store's flat layout before load(), with its
+        // `.downloading` phase — plus `ModelStore.snapshotDirectory` for the store probe. (≥ 0.27.0
+        // already carried the CAN cancellation gate.)
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.32.0"),
         // ≥ 0.4.0: timed N:M transform (per-output PTS) — the temporal chunking driver buffers
         // windows of frames and must hand each output its own recorded source PTS.
         .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.4.0"),
@@ -84,6 +88,10 @@ let package = Package(
             dependencies: [
                 "MLXSeedVR2",
                 .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+                // --engine-store lane: drive prepare() through the real MLXServeEngine against a
+                // store root and capture MLXEngineTestKit's `[MAT]` materialization line.
+                .product(name: "MLXServeCore", package: "mlx-engine-swift"),
+                .product(name: "MLXEngineTestKit", package: "mlx-engine-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
