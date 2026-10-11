@@ -285,6 +285,22 @@ final class SeedVR2ImageRefiner: @unchecked Sendable {
                 throw SeedVR2ImageRefinerError.decodeFailed
             }
             return cg
+        case .rawRGBA16:
+            // MLXToolKit contract 1.52.0 (AB-A-0158): RGBA, 16 bits per component, little-endian, sRGB, premultiplied.
+            // This surface does not declare it (the engine refuses it before the run); decoded here for direct callers,
+            // and so this switch stays exhaustive.
+            guard let w = image.width, let h = image.height else { throw SeedVR2ImageRefinerError.decodeFailed }
+            let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue
+                | CGBitmapInfo.byteOrder16Little.rawValue)   // RGBA16
+            guard let provider = CGDataProvider(data: image.data as CFData),
+                  let cs = CGColorSpace(name: CGColorSpace.sRGB),
+                  let cg = CGImage(width: w, height: h, bitsPerComponent: 16, bitsPerPixel: 64,
+                                   bytesPerRow: image.bytesPerRow ?? w * 8, space: cs, bitmapInfo: info,
+                                   provider: provider, decode: nil, shouldInterpolate: false,
+                                   intent: .defaultIntent) else {
+                throw SeedVR2ImageRefinerError.decodeFailed
+            }
+            return cg
         }
     }
 

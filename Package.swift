@@ -26,8 +26,9 @@ let package = Package(
         // ≥ 0.32.0: engine-executed weight materialization (contract 1.24) — the engine downloads the
         // declared `WeightSourcing` source into the store's flat layout before load(), with its
         // `.downloading` phase — plus `ModelStore.snapshotDirectory` for the store probe. (≥ 0.27.0
-        // already carried the CAN cancellation gate.)
-        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.32.0"),
+        // already carried the CAN cancellation gate.) ≥ 0.67.0: contract 1.52.0 added `Image.Format.rawRGBA16`, which the
+        // exhaustive switch in SeedVR2ImageRefiner.decodeCGImage names (AB-A-0158).
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.67.0"),
         // ≥ 0.4.0: timed N:M transform (per-output PTS) — the temporal chunking driver buffers
         // windows of frames and must hand each output its own recorded source PTS.
         .package(url: "https://github.com/xocialize/frame-stream-native.git", from: "0.4.0"),
