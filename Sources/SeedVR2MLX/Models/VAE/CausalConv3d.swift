@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT (port). SeedVR2 model/weights: Apache-2.0 / ByteDance.
 // Port of mflux seedvr2_vae/common/conv3d.py + SeedVR video_vae_v3 streaming memory.
 import MLX
+import MLXExactConv
 import MLXNN
 
 /// VAE activation precision after group-norms (mflux `ModelConfig.precision`).
@@ -91,7 +92,11 @@ public final class CausalConv3d: Module {
             memory.tail = x[0..., 0..., (x.shape[2] - memoryFrames)...].contiguous()
         }
         x = x.transposed(0, 2, 3, 4, 1).asType(weight.dtype)        // NDHWC
-        var out = convGeneral(x, weight, strides: [s.0, s.1, s.2], padding: [tPad, p.1, p.2])
+        // Through ExactConv (AB-T-0214): the RGB `conv_in` (3 channels) is a conv3d mlx 0.32.2 serves with
+        // `pad_and_slice_conv_3D_gpu`, which frees its zero fill value while the GPU still reads it; under a capped
+        // buffer cache (the Image Engine's 2 GiB) the process dies with "Invalid Resource". ExactConv pads such
+        // channels in the graph; `exact: false` leaves every other shape on the plain conv3d it ran before.
+        var out = ExactConv.conv3d(x, weight: weight, stride: s, padding: (tPad, p.1, p.2), exact: false)
         out = out + bias
         return out.transposed(0, 4, 1, 2, 3)                        // back to [B,O,T,H,W]
     }

@@ -43,6 +43,9 @@ let package = Package(
         // (mlx#3810) and is the floor of the next mlx-swift-lm — capped at the next
         // unvalidated minor.
         .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.33.0"),
+        // ≥ 0.1.1: the VAE's 3-channel conv_in never reaches mlx 0.32.2's channel-pad helper, which frees a buffer the
+        // GPU still reads (AB-T-0214).
+        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.1"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
     targets: [
@@ -54,6 +57,7 @@ let package = Package(
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
+                .product(name: "MLXExactConv", package: "mlx-exact-conv-swift"),
             ],
             path: "Sources/SeedVR2MLX",
             // Core was authored in Swift 5 (tools 5.9); keep v5 mode in this 6.2 package.
@@ -103,6 +107,7 @@ let package = Package(
             dependencies: [
                 "SeedVR2MLX",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXExactConv", package: "mlx-exact-conv-swift"),
             ],
             path: "Tests/SeedVR2MLXTests"
         ),
