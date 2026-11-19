@@ -39,13 +39,14 @@ let package = Package(
         // RealESRGANMLX now ships from the consolidated mlx-realesrgan-swift (was realesrgan-mlx-swift, archived).
         // ≥ 0.6.0: region-aware MLXTileProcessor.process (tile origins for the continuous noise field).
         .package(url: "https://github.com/xocialize/mlx-realesrgan-swift.git", from: "0.6.4"),
-        // "..<0.33.0": admits 0.32.x — 0.32.2 carries the NAX split-K GEMM fix
-        // (mlx#3810) and is the floor of the next mlx-swift-lm — capped at the next
-        // unvalidated minor.
-        .package(url: "https://github.com/ml-explore/mlx-swift", "0.31.2" ..< "0.33.0"),
+        // "..<0.34.0": admits 0.32.x (0.32.2 carries the NAX split-K GEMM fix, mlx#3810)
+        // and 0.33.x, which mlx-swift-lm 3.33.0 requires — capped at the next unvalidated
+        // minor. The URL is the fleet's fork (same package identity as ml-explore's), whose
+        // 0.33.1 carries the M5 attention patch mlx-engine-swift 0.82.1 takes (AB-D-0264).
+        .package(url: "https://github.com/xocialize/mlx-swift", "0.31.2" ..< "0.34.0"),
         // ≥ 0.1.1: the VAE's 3-channel conv_in never reaches mlx 0.32.2's channel-pad helper, which frees a buffer the
-        // GPU still reads (AB-T-0214).
-        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.1"),
+        // GPU still reads (AB-T-0214). 0.1.2 is the first that admits mlx-swift 0.33.x.
+        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.2"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
     targets: [
